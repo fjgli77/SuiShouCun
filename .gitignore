@@ -1,0 +1,42 @@
+# ===== 构建产物（不纳入版本库）=====
+dist/
+build/
+*.apk
+*.exe
+*.idsig
+*.pyz
+*.spec
+*.toc
+
+# ===== Android 构建中间文件 =====
+android/build/
+android/build_bak_*/
+android/vendor/
+android/debug.keystore
+
+# ===== Python 缓存 =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ===== 运行时下载 / 日志 / 截图 =====
+downloads/
+*.log
+app_device.log
+app_err.txt
+device_logcat.txt
+full_log.txt
+verify*.txt
+shot.png
+
+# ===== 本机应用日志（在 %LOCALAPPDATA%）=====
+SuiShouCun/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+
+# ===== WorkBuddy 项目元数据 =====
+.workbuddy/

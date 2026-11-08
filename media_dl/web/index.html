@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#101529">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>随手存</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+<link rel="apple-touch-icon" href="/static/icon.svg">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <!-- 吸顶头部：品牌栏 + 平台标签，滚动时固定在顶部（PC 与移动端都是） -->
+  <div class="head-stick" id="head-stick">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">DL</div>
+        <div class="brand-txt">
+          <h1>随手存 <span class="edition" id="edition">本机运行</span></h1>
+          <p id="subtitle">自动识别平台与类型 · 免 Cookie · 免代理 · 可选去水印 · 结果可预览</p>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span class="pill" id="state-pill">连接中</span>
+        <span class="pill ok" id="nowm-pill">可去水印</span>
+        <button class="btn btn-ghost btn-sm exit-btn pc-only" id="btn-exit" title="退出随手存电脑端">退出程序</button>
+      </div>
+    </header>
+    <div class="chips" id="platforms"></div>
+  </div>
+
+  <main>
+    <section class="card" id="input-card">
+      <div class="card-head">
+        <h2>粘贴链接</h2>
+        <span class="muted" id="input-count">0 个链接</span>
+      </div>
+      <textarea id="input" spellcheck="false" placeholder="示例：&#10;8.87 复制打开抖音，看看【作品】 https://v.douyin.com/xxxx/ 复制此链接&#10;https://www.douyin.com/video/7705524077934562595&#10;https://www.bilibili.com/bangumi/play/ep321808/&#10;https://example.com/photo.jpg"></textarea>
+      <div class="detect-list" id="detect-list"></div>
+    </section>
+
+    <section class="card" id="settings-card">
+      <div class="card-head clickable" id="settings-head">
+        <h2>下载设置</h2>
+        <span class="muted">展开 / 收起 <span id="settings-arrow">▾</span></span>
+      </div>
+      <div class="settings" id="settings">
+        <label class="field">
+          <span>画质上限</span>
+          <div class="dd" id="dd-quality">
+            <input type="hidden" id="opt-quality" value="best">
+            <button type="button" class="dd-btn" aria-haspopup="listbox"></button>
+            <div class="dd-list" role="listbox">
+              <button type="button" class="dd-opt" data-value="best">最高可用</button>
+              <button type="button" class="dd-opt" data-value="2160">4K / 2160P</button>
+              <button type="button" class="dd-opt" data-value="1080">1080P</button>
+              <button type="button" class="dd-opt" data-value="720">720P</button>
+              <button type="button" class="dd-opt" data-value="480">480P</button>
+            </div>
+          </div>
+        </label>
+        <label class="field">
+          <span>最多图片数 / 每个图集</span>
+          <div class="dd" id="dd-max-images">
+            <input type="hidden" id="opt-max-images" value="30">
+            <button type="button" class="dd-btn" aria-haspopup="listbox"></button>
+            <div class="dd-list" role="listbox">
+              <button type="button" class="dd-opt" data-value="10">10 张</button>
+              <button type="button" class="dd-opt" data-value="30">30 张</button>
+              <button type="button" class="dd-opt" data-value="60">60 张</button>
+              <button type="button" class="dd-opt" data-value="100">100 张</button>
+            </div>
+          </div>
+        </label>
+        <div class="field checks">
+          <label class="check"><input type="checkbox" id="opt-remove-watermark" checked> <strong>去除水印</strong>（优先无水印直链）</label>
+          <label class="check pc-only"><input type="checkbox" id="opt-audio-only"> 只下载音频（mp3）</label>
+          <label class="check pc-only"><input type="checkbox" id="opt-thumbnail"> 同时保存封面</label>
+          <label class="check"><input type="checkbox" id="opt-page-images" checked> 网页图片兜底提取</label>
+          <label class="check"><input type="checkbox" id="opt-expand" checked> 自动展开短链</label>
+        </div>
+      </div>
+    </section>
+
+    <section class="card hidden" id="result-card">
+      <div class="card-head">
+        <h2>解析结果</h2>
+        <div class="row">
+          <span class="badge" id="result-summary"></span>
+          <button class="btn btn-ghost btn-sm" id="btn-download-all">全部下载</button>
+        </div>
+      </div>
+      <div id="result-errors"></div>
+      <div id="result-list" class="result-list"></div>
+      <p class="tip" id="result-tip"></p>
+    </section>
+  </main>
+
+  <div class="status" id="status">已就绪 · 粘贴链接后点下方按钮</div>
+</div>
+
+<!-- 底部操作栏：PC 上是普通一行，移动端固定到屏幕底部 -->
+<div class="action-bar">
+  <div class="tools">
+    <button class="btn btn-ghost btn-sm" id="btn-paste">粘贴</button>
+    <button class="btn btn-ghost btn-sm" id="btn-clear">清空</button>
+    <span class="grow"></span>
+    <span class="nw" id="wm-chip">去水印 · 免 Cookie</span>
+  </div>
+  <div class="row actions">
+    <button class="btn" id="btn-parse">仅解析</button>
+    <button class="btn btn-primary" id="btn-download">下载</button>
+  </div>
+</div>
+
+<!-- 解析结果预览 -->
+<div class="modal hidden" id="preview-modal">
+  <div class="modal-box preview-box">
+    <h3 id="preview-title">预览</h3>
+    <div class="preview-body" id="preview-body"></div>
+    <div class="row modal-actions">
+      <button class="btn" id="btn-preview-download">下载此项</button>
+      <span class="grow"></span>
+      <button class="btn btn-primary" id="btn-preview-close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

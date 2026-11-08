@@ -1,0 +1,25 @@
+{
+  "name": "随手存 · 链接下载",
+  "short_name": "随手存",
+  "description": "粘贴抖音、快手、B站等分享链接，把视频、图片、图集保存到本机；免 Cookie、免代理、可选去水印",
+  "lang": "zh-CN",
+  "start_url": "/?pwa=1",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0d1222",
+  "theme_color": "#101529",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "params": { "text": "text" }
+  }
+}
