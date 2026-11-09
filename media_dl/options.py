@@ -2,12 +2,54 @@
 
 from __future__ import annotations
 
+import os
+import re as _re
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from .links import DESKTOP_UA, MOBILE_UA
+
+# 用户手动粘贴的抖音登录态 Cookie 只会发往抖音自身域名，绝不上传到任何服务器。
+# 这些域名都写进 Netscape cookies.txt，yt-dlp 按域名匹配下发，从而突破图文 / 登录作品的风控。
+_COOKIE_DOMAINS = (".douyin.com", ".amemv.com", ".snssdk.com", ".tiktok.com", ".ixigua.com")
+_COOKIE_CACHE: dict[str, str] = {}
+
+
+def write_cookie_file(cookie_str: str) -> "str | None":
+    """把用户粘贴的原始 Cookie 头（"a=b; c=d" 或带 "Cookie: " 前缀）转成 Netscape
+    cookies.txt，供 yt-dlp 的 cookiefile 使用；无法解析时返回 None。
+    按内容缓存到临时文件，避免每次解析都重写。"""
+    raw = (cookie_str or "").strip()
+    if not raw:
+        return None
+    raw = _re.sub(r"^[Cc]ookie:\s*", "", raw).strip()
+    pairs = [p.strip() for p in raw.split(";") if p.strip()]
+    if not pairs:
+        return None
+    cache_key = raw
+    if cache_key in _COOKIE_CACHE and os.path.exists(_COOKIE_CACHE[cache_key]):
+        return _COOKIE_CACHE[cache_key]
+    lines = ["# Netscape HTTP Cookie File", ""]
+    for p in pairs:
+        if "=" not in p:
+            continue
+        name, _, value = p.partition("=")
+        name = name.strip()
+        value = value.strip().strip('"')
+        if not name:
+            continue
+        for domain in _COOKIE_DOMAINS:
+            lines.append("\t".join([domain, "TRUE", "/", "FALSE", "0", name, value]))
+    if len(lines) <= 2:
+        return None
+    fd, path = tempfile.mkstemp(prefix="media_dl_cookies_", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as fp:
+        fp.write("\n".join(lines) + "\n")
+    _COOKIE_CACHE[cache_key] = path
+    return path
 
 
 def has_ffmpeg() -> bool:
@@ -60,6 +102,7 @@ class DownloadOptions:
     remove_watermark: bool = True    # 勾选后优先无水印直链；关闭时保留平台原始文件
     cookies_browser: str = ""        # chrome | edge | firefox | brave | opera
     cookie_file: str = ""            # Netscape 格式 cookies.txt
+    cookie: str = ""                 # 用户手动粘贴的抖音登录态 Cookie（仅本机保存，发往抖音）
     proxy: str = ""
     timeout: float = 20.0
     retries: int = 3
@@ -102,6 +145,7 @@ class DownloadOptions:
             "remove_watermark": self.remove_watermark,
             "cookies_browser": self.cookies_browser,
             "cookie_file": self.cookie_file,
+            "cookie": self.cookie,
             "proxy": self.proxy,
             "timeout": self.timeout,
             "retries": self.retries,
@@ -123,8 +167,10 @@ def ytdlp_opts(
     if opts.audio_only:
         fmt = "ba/b"
     elif not has_ffmpeg():
-        # 没有 ffmpeg 时只能取包含音轨的单一文件，避免下载后无法合并
-        fmt = "b"
+        # 没有 ffmpeg 时无法合并「视频轨 + 音频轨」。B 站等平台只提供分离轨，
+        # 写死 "b"（要求含音轨的单一文件）会直接报 "Requested format is not available"。
+        # 这里在「带音轨的单文件 / 最佳视频轨 / 任意」之间逐级回退，保证总能拿到流。
+        fmt = "b[acodec!=none]/bv*[acodec!=none]/b/bv*/best"
     elif opts.quality and opts.quality.isdigit():
         h = int(opts.quality)
         fmt = f"bv*[height<={h}]+ba/b[height<={h}]/b"
@@ -167,6 +213,12 @@ def ytdlp_opts(
         ydl["cookiesfrombrowser"] = (opts.cookies_browser, None, None, None)
     if opts.cookie_file:
         ydl["cookiefile"] = opts.cookie_file
+    elif opts.cookie:
+        # 用户手动粘贴的抖音登录态 Cookie：转成 Netscape 文件交给 yt-dlp，
+        # 用于免 Cookie 通道取不到的抖音图文 / 登录作品（仅发往抖音，不上传）
+        cookie_path = write_cookie_file(opts.cookie)
+        if cookie_path:
+            ydl["cookiefile"] = cookie_path
     if opts.proxy:
         ydl["proxy"] = opts.proxy
     return ydl

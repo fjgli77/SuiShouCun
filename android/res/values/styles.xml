@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App 主题：底色固定为深色启动背景，避免冷启动白闪。
+         控件配色在 Java 里全部显式指定，所以这里沿用 Light 父主题不会影响可读性。 -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_bg</item>
+        <item name="android:statusBarColor">@color/splash_bg</item>
+        <item name="android:navigationBarColor">@color/splash_bg</item>
+        <item name="android:colorBackground">@color/splash_bg</item>
+    </style>
+</resources>

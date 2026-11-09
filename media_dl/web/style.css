@@ -79,6 +79,8 @@ h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: .2px; }
 .card {
   background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
   padding: 18px 20px; margin-bottom: 16px; box-shadow: var(--shadow);
+  /* 不裁剪溢出内容：结果条底部的画质浮层默认向上展开，若被裁掉会看起来像渲染异常 */
+  overflow: visible;
 }
 .card.hidden, .settings.collapsed { display: none; }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
@@ -122,6 +124,15 @@ textarea::placeholder { color: #a3acbb; }
 .checks { grid-column: span 2; display: flex; flex-wrap: wrap; gap: 18px; padding-top: 22px; }
 .check { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 13px; cursor: pointer; }
 .check input { accent-color: var(--primary); width: 15px; height: 15px; }
+.cookie-field { grid-column: 1 / -1; }
+.cookie-field textarea {
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text); background: var(--surface-2); outline: none; resize: vertical; line-height: 1.5;
+}
+.cookie-field textarea:focus { border-color: var(--primary); background: #fff; }
+.cookie-field .hint { color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+body.is-mobile .cookie-field textarea { background: rgba(0,0,0,.18); }
 
 /* 自定义下拉框（原生 select 的弹出列表样式无法控制） */
 .dd { position: relative; }
@@ -131,16 +142,21 @@ textarea::placeholder { color: #a3acbb; }
   font-size: 13px; font-family: inherit; color: var(--text); background: var(--surface-2);
   cursor: pointer; min-height: 36px; text-align: left; transition: border-color .15s, background .15s;
 }
+.dd.open { z-index: 70; }                 /* 展开时整组抬升，浮层压在相邻按钮之上 */
 .dd-btn::after { content: "▾"; color: var(--muted); font-size: 11px; transition: transform .15s; flex: none; }
 .dd.open .dd-btn::after { transform: rotate(180deg); }
 .dd.open .dd-btn { border-color: var(--primary); background: #fff; }
 .dd-list {
-  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 36;
+  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 80;
+  /* 必须是不透明实底：半透明会让下层按钮透出来，看起来像浮层渲染异常 */
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: 0 12px 32px rgba(20, 30, 50, .16); padding: 5px;
   max-height: 242px; overflow: auto; display: none;
+  overscroll-behavior: contain;
 }
 .dd.open .dd-list { display: block; }
+/* JS 判定下方空间不足时向上翻转，避免浮层被视口下边界 / 卡片裁掉 */
+.dd.drop-up .dd-list { top: auto; bottom: calc(100% + 6px); }
 .dd-opt {
   display: block; width: 100%; border: 0; background: none; text-align: left;
   font-size: 13px; font-family: inherit; color: var(--text);
@@ -148,6 +164,9 @@ textarea::placeholder { color: #a3acbb; }
 }
 .dd-opt:hover { background: var(--primary-soft); }
 .dd-opt.sel { color: var(--primary); font-weight: 600; background: var(--primary-soft); }
+/* 结果卡片：展开的浮层需要能溢出卡片，否则会被 overflow:hidden 裁掉一半 */
+.result-item { position: relative; }
+.result-item.dd-active { z-index: 65; }
 
 /* 粘贴即识别 */
 .detect-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
@@ -180,6 +199,11 @@ textarea::placeholder { color: #a3acbb; }
 .ri-info { flex: 1; min-width: 0; }
 .ri-title { font-size: 13.5px; font-weight: 580; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ri-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.ri-quality { display: flex; align-items: center; gap: 7px; margin-top: 8px; }
+.ri-quality > span { font-size: 11.5px; color: var(--muted); flex: none; }
+.ri-quality .dd { flex: none; min-width: 92px; }
+/* 结果条内的浮层宽度跟随按钮，避免只有按钮宽时文字被挤断行 */
+.ri-quality .dd-list { left: 0; right: auto; min-width: 100%; }
 .ri-actions { flex: none; display: flex; gap: 7px; margin-top: 10px; }
 .tag { font-size: 11px; padding: 2px 8px; border-radius: 6px; background: var(--primary-soft); color: var(--primary); }
 .tag.kind { background: #f0edff; color: #6d4bd8; }
@@ -272,12 +296,15 @@ body.is-mobile {
 }
 body.is-mobile * { -webkit-tap-highlight-color: transparent; }
 body.is-mobile .app { padding: calc(18px + env(safe-area-inset-top)) 14px calc(164px + env(safe-area-inset-bottom)); }
+/* 性能：Android WebView 里 backdrop-filter: blur() 由 CPU 合成，滚动/输入时逐帧重算
+ * 会明显卡顿（低端机与模拟器尤其严重）。移动端一律改为不透明实底 + 细边框，
+ * 视觉几乎等价但不再有实时模糊开销。 */
 body.is-mobile .head-stick {
   margin: calc(-18px - env(safe-area-inset-top)) -14px 14px;
   padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
-  background: rgba(13, 18, 34, .88);
+  background: #0d1222;
   border-bottom: 1px solid rgba(255, 255, 255, .08);
-  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: none; backdrop-filter: none;
 }
 body.is-mobile .head-stick .chips { margin-top: 6px; }
 body.is-mobile .logo {
@@ -287,6 +314,11 @@ body.is-mobile .logo {
 }
 body.is-mobile h1 { font-size: 21px; }
 body.is-mobile .brand p { font-size: 12px; }
+/* 移动端顶栏极简：去掉宣传性副标题（粘贴链接/直接存到手机/免 Cookie）与「可去水印」，
+   只保留「随手存 [Android] + 版本号」。底部工具行的「去水印 · 免 Cookie」同样隐藏。 */
+body.is-mobile #subtitle { display: none; }
+body.is-mobile #nowm-pill { display: none; }
+body.is-mobile .nw { display: none; }
 body.is-mobile .edition { background: rgba(53, 224, 176, .14); color: #35e0b0; }
 body.is-mobile .topbar-right { flex-direction: column; align-items: flex-end; gap: 4px; }
 body.is-mobile .pill { font-size: 11px; padding: 3px 9px; background: rgba(255,255,255,.07); }
@@ -298,7 +330,9 @@ body.is-mobile .platform-chip {
 }
 body.is-mobile .card {
   border-radius: 20px; padding: 16px; margin-bottom: 14px;
-  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  /* 同上：移动端去掉实时模糊，改实底，避免逐帧重绘导致卡顿 */
+  background: #151c33;
+  -webkit-backdrop-filter: none; backdrop-filter: none;
 }
 body.is-mobile .card-head h2 { font-size: 16px; }
 body.is-mobile .muted { font-size: 12px; }
@@ -323,8 +357,9 @@ body.is-mobile .dd-btn {
 }
 body.is-mobile .dd.open .dd-btn { background: rgba(0, 0, 0, .28); border-color: #35e0b0; }
 body.is-mobile .dd-list {
+  /* 移动端浮层必须是不透明实底，否则会与下层"保存到手机"按钮叠压成乱码观感 */
   background: #1b2440; border-color: rgba(255, 255, 255, .14);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, .5); border-radius: 14px; max-height: 300px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .6); border-radius: 14px; max-height: 300px;
 }
 body.is-mobile .dd-opt { font-size: 15px; padding: 11px 13px; }
 body.is-mobile .dd-opt:hover { background: rgba(255, 255, 255, .08); }
@@ -343,8 +378,18 @@ body.is-mobile .tag.kind { background: rgba(180,150,255,.16); color: #c9b3ff; }
 body.is-mobile .tag.ok { background: rgba(53,224,176,.14); color: #35e0b0; }
 body.is-mobile .tag.err, body.is-mobile .err-line { color: #ff8080; }
 body.is-mobile .badge { background: rgba(53,224,176,.14); color: #35e0b0; }
+/* 结果卡片：不要裁剪溢出内容，否则展开的画质浮层会被切掉一半（视觉上像渲染异常） */
 body.is-mobile .result-item { border-radius: 16px; }
+/* 长标题在移动端最多显示两行并截断，避免撑破卡片 / 挤掉操作按钮 */
+body.is-mobile .ri-main { min-width: 0; }
+body.is-mobile .ri-title {
+  white-space: normal; word-break: break-word; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; line-height: 1.45;
+}
 body.is-mobile .ri-thumb { width: 68px; height: 54px; }
+body.is-mobile .ri-quality .dd { min-width: 88px; }
+body.is-mobile .ri-quality .dd-btn { min-height: 38px; font-size: 13px; padding: 5px 10px; border-radius: 10px; }
 body.is-mobile .ri-actions .btn { flex: 1; }
 body.is-mobile .detect-chip { background: rgba(255,255,255,.06); border-radius: 999px; }
 body.is-mobile .detect-chip .du { max-width: 150px; }
@@ -354,9 +399,9 @@ body.is-mobile .err-line.warn { color: var(--amber); }
 body.is-mobile .action-bar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
   max-width: none; margin: 0; padding: 8px 14px calc(10px + env(safe-area-inset-bottom));
-  background: linear-gradient(180deg, rgba(13,18,34,.72), rgba(9,13,26,.97));
+  background: #090d1a;
   border-top: 1px solid rgba(255,255,255,.10);
-  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: none; backdrop-filter: none;
 }
 body.is-mobile .tools { margin-bottom: 7px; }
 body.is-mobile .tools .btn { min-height: 30px; font-size: 12px; padding: 3px 10px; }

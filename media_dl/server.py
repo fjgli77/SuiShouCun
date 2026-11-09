@@ -40,6 +40,27 @@ _JOBS: dict[str, dict[str, Any]] = {}
 _LOCK = threading.RLock()
 _DEFAULT_OUTDIR = Path.cwd() / "downloads"
 
+# APP 内登录抖音自动捕获的登录态 Cookie：仅在本机保存与使用，只发往抖音，绝不上传。
+_DATA_DIR = Path(__file__).resolve().parent / "data"
+_COOKIE_STORE = _DATA_DIR / "cookie_store.txt"
+
+
+def _load_cookie_store() -> str:
+    try:
+        if _COOKIE_STORE.exists():
+            return _COOKIE_STORE.read_text(encoding="utf-8").strip()
+    except Exception:                       # noqa: BLE001
+        return ""
+    return ""
+
+
+def _save_cookie_store(cookie: str) -> None:
+    try:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _COOKIE_STORE.write_text((cookie or "").strip(), encoding="utf-8")
+    except Exception:                       # noqa: BLE001
+        pass
+
 _STATE: dict[str, Any] = {
     "host": "127.0.0.1",
     "port": 8765,
@@ -144,7 +165,7 @@ def api_config():
         "watermark_free": True,
         "preview": True,
         "nocookie": True,
-        "version": "6.0",
+        "version": "6.1",
         "runtime": current,
         "client": current,
         # 前端能力开关：Android 上有 Java 原生下载，PC 上交给浏览器
@@ -156,6 +177,22 @@ def api_config():
 def api_auth():
     """v6 没有口令与配对，任何本机请求都已是可信的。"""
     return jsonify({"ok": True, "client": runtime()})
+
+
+@app.post("/api/set-cookie")
+def api_set_cookie():
+    """APP 内登录抖音后，由 Android 端把捕获的登录态 Cookie 存到本机（只发往抖音）。"""
+    data = request.get_json(silent=True) or {}
+    cookie = str(data.get("cookie") or "").strip()
+    _save_cookie_store(cookie)
+    return jsonify({"ok": True, "has_cookie": bool(cookie)})
+
+
+@app.get("/api/cookie")
+def api_get_cookie():
+    """前端读取本机是否已存有登录态 Cookie（用于显示状态 / 自动填充）。"""
+    c = _load_cookie_store()
+    return jsonify({"cookie": c, "has_cookie": bool(c)})
 
 
 @app.post("/api/shutdown")
@@ -235,9 +272,14 @@ def api_fetch():
     as_zip = str(request.args.get("zip") or "1") != "0"
     preview = str(request.args.get("preview") or "0") == "1"
     range_header = request.headers.get("Range", "") if preview else ""
+    quality_override = request.args.get("q")
+    try:
+        quality_override = int(quality_override) if quality_override else None
+    except (TypeError, ValueError):
+        quality_override = None
     try:
         return fetch_browser_download(ticket, index, file_index, as_zip,
-                                      preview, range_header)
+                                      preview, range_header, quality_override)
     except LookupError as exc:
         return jsonify({"error": str(exc)}), 404
     except Exception as exc:                          # noqa: BLE001
@@ -355,15 +397,19 @@ def api_download():
 # 后台任务
 # --------------------------------------------------------------------------- #
 def _opts_from_request(data: dict[str, Any]) -> DownloadOptions:
-    """界面不提供目录 / Cookie / 代理设置：统一由服务端固定，全程免登录。
+    """界面不提供目录 / 自动读取浏览器 Cookie / 代理：统一由服务端固定。
 
-    可选开关（画质、去水印、图集数量、短链展开等）由前端 options 传入。
+    可选开关（画质、去水印、图集数量、短链展开、登录态 Cookie 等）由前端 options 传入。
+    其中 cookie 是用户手动粘贴的抖音登录态，仅本机保存、只发往抖音，不上传任何服务器；
+    cookies_browser（自动读取浏览器登录态）与 proxy 出于隐私 / 产品策略保持关闭。
     """
     raw = dict(data.get("options") or {})
     raw["outdir"] = str(_DEFAULT_OUTDIR)
-    raw["cookies_browser"] = ""
-    raw["cookie_file"] = ""
-    raw["proxy"] = ""
+    raw["cookies_browser"] = ""      # 不自动读取浏览器登录态（隐私）
+    raw["cookie_file"] = ""          # 界面只走手动粘贴的 cookie 字符串
+    raw["proxy"] = ""                # 产品策略：全程免代理
+    # Cookie 优先用界面手动粘贴的；为空时回退到 APP 内登录抖音自动捕获并存储的登录态
+    raw["cookie"] = (raw.get("cookie") or "").strip() or _load_cookie_store()
     return DownloadOptions.from_dict(raw)
 
 
@@ -533,7 +579,7 @@ def run_server(
 
     local_url = f"http://127.0.0.1:{port}"
     print("\n" + "=" * 62)
-    print("  随手存 v6.0 · 一个应用，PC / Android 各自本机运行")
+    print("  随手存 v6.1 · 一个应用，PC / Android 各自本机运行")
     print(f"  运行位置  : {'Android APK' if current == 'android' else 'Windows EXE'}")
     print(f"  界面地址  : {local_url}/")
     print("  下载方式  : " + ("Java 原生写入手机存储" if current == "android" else "交给浏览器下载管理器"))

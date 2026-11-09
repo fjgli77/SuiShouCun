@@ -20,7 +20,8 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# ===== 运行时下载 / 日志 / 截图 =====
+# ===== 运行时数据 / 下载 / 日志 / 截图 =====
+media_dl/data/
 downloads/
 *.log
 app_device.log

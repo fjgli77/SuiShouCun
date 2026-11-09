@@ -62,11 +62,15 @@
       remove_watermark: $("opt-remove-watermark").checked,
       write_thumbnail: $("opt-thumbnail").checked,
       page_images: $("opt-page-images").checked,
-      expand_shortlinks: $("opt-expand").checked
+      expand_shortlinks: $("opt-expand").checked,
+      cookie: ($("opt-cookie") ? $("opt-cookie").value.trim() : "")
     };
   }
 
+  // 移动端顶栏不做文案铺陈，底部也不显示水印提示徽标；只在 PC 上更新这枚文字，
+  // 避免移动端（已用 CSS 隐藏）在切换「去除水印」时还去写一个不可见节点。
   function updateWmChip() {
+    if (!$("wm-chip") || MOBILE) return;
     $("wm-chip").textContent = $("opt-remove-watermark").checked
       ? "去水印 · 免 Cookie" : "原始文件 · 免 Cookie";
   }
@@ -83,6 +87,25 @@
   // ------------------------------------------------------------------ //
   function closeAllDropdowns() {
     Array.prototype.forEach.call(document.querySelectorAll(".dd.open"), (d) => d.classList.remove("open"));
+    Array.prototype.forEach.call(document.querySelectorAll(".result-item.dd-active"),
+                                     (d) => d.classList.remove("dd-active"));
+  }
+
+  // 浮层定位：默认向下展开；下方空间不足时向上翻转，避免被视口 / 卡片下边界裁切
+  // （结果条里的画质下拉在卡片底部，向上展开更稳妥）。同时给所属结果条加 dd-active，
+  // 让整条抬升到相邻结果条之上（比依赖 :has() 更稳，老 WebView 也生效）。
+  function positionDropdown(root) {
+    const list = root.querySelector(".dd-list");
+    const btn = root.querySelector(".dd-btn");
+    if (!list || !btn) return;
+    root.classList.remove("drop-up");
+    const owner = root.closest(".result-item");
+    if (owner) owner.classList.add("dd-active");
+    const rect = btn.getBoundingClientRect();
+    const need = Math.min(list.scrollHeight || 240, 300) + 14;
+    if (window.innerHeight - rect.bottom < need && rect.top > need) {
+      root.classList.add("drop-up");
+    }
   }
 
   function initDropdown(hiddenId) {
@@ -107,7 +130,7 @@
       e.stopPropagation();
       const wasOpen = root.classList.contains("open");
       closeAllDropdowns();
-      if (!wasOpen) root.classList.add("open");
+      if (!wasOpen) { root.classList.add("open"); positionDropdown(root); }
     });
     Array.prototype.forEach.call(list.querySelectorAll(".dd-opt"), (o) => {
       o.addEventListener("click", (e) => {
@@ -134,6 +157,7 @@
     ].forEach(([id, key]) => {
       if (saved[key] !== undefined) $(id).checked = !!saved[key];
     });
+    if (saved.cookie !== undefined && $("opt-cookie")) $("opt-cookie").value = saved.cookie;
     updateWmChip();
   }
 
@@ -174,8 +198,54 @@
   function previewHref(item) { return apiUrl(item.preview_url); }
   function thumbHref(item) { return apiUrl(item.thumb_url); }
 
+  function qualityOf(item) {
+    // 视频：解析出的真实清晰度（默认最高）作为按条覆盖；无档位时沿用全局画质上限
+    if (item.kind !== "video" || !item.qualities || !item.qualities.length) return "";
+    const root = document.querySelector('.q-dd[data-i="' + item.index + '"]');
+    let h = item.qualities[0];
+    if (root) {
+      const sel = root.querySelector(".dd-opt.sel");
+      if (sel) h = parseInt(sel.dataset.value, 10);
+    }
+    return h ? ("&q=" + h) : "";
+  }
+
+  // 结果栏逐条画质选择：用与全局设置一致的自定义下拉（两端通用、触控友好、深色适配）
+  function initItemQualities() {
+    Array.prototype.forEach.call(document.querySelectorAll(".q-dd"), (root) => {
+      const btn = root.querySelector(".dd-btn");
+      const list = root.querySelector(".dd-list");
+      const opts = list.querySelectorAll(".dd-opt");
+      const first = opts[0];
+      if (first) {
+        first.classList.add("sel");
+        btn.innerHTML = "<span>" + escapeHtml(first.textContent) + "</span>";
+      }
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const wasOpen = root.classList.contains("open");
+        closeAllDropdowns();
+        if (!wasOpen) { root.classList.add("open"); positionDropdown(root); }
+      });
+      Array.prototype.forEach.call(opts, (o) => {
+        o.addEventListener("click", (e) => {
+          e.stopPropagation();
+          Array.prototype.forEach.call(opts, (x) => x.classList.remove("sel"));
+          o.classList.add("sel");
+          btn.innerHTML = "<span>" + escapeHtml(o.textContent) + "</span>";
+          closeAllDropdowns();
+        });
+      });
+    });
+  }
+
   function triggerDownload(item) {
-    const url = downloadHref(item);
+    // 移动端图集：不打包 zip，逐张图片单独下载到手机本地（DCIM/随手存）
+    if (NATIVE && item.kind === "gallery" && item.count > 1) {
+      downloadGalleryAsImages(item);
+      return;
+    }
+    const url = downloadHref(item) + qualityOf(item);
     if (NATIVE) {
       try {
         const started = BRIDGE.download(url, item.title || "media");
@@ -196,6 +266,23 @@
     setTimeout(() => { if (a.parentNode) document.body.removeChild(a); }, 1500);
   }
 
+  // 移动端：图集逐张下载。每张用 &zip=0&j=<序号> 取单图，Java 原生写入 DCIM/随手存
+  function downloadGalleryAsImages(item) {
+    const base = apiUrl(item.download_url);
+    let done = 0;
+    for (let j = 0; j < item.count; j++) {
+      const url = base + "&zip=0&j=" + j;
+      try {
+        const started = BRIDGE.download(url, item.title + "_" + (j + 1));
+        if (started === false) { toast("第 " + (j + 1) + " 张下载启动失败"); }
+      } catch (e) {
+        toast("调用本地下载失败：" + e.message);
+      }
+    }
+    toast("已开始把 " + item.count + " 张图片逐张保存到手机本地");
+    setStatus("正在把 " + item.count + " 张图片逐张保存到手机本地（DCIM/随手存）");
+  }
+
   // Java 原生下载线程通过 evaluateJavascript 回调这里
   window.onNativeDownload = function (state, filename, message) {
     if (state === "done") {
@@ -207,6 +294,12 @@
     } else if (state === "progress") {
       setStatus("正在保存到手机本地… " + (message || ""));
     }
+  };
+
+  // 移动端抖音登录态同步完成后，Java 端回调这里刷新界面状态
+  window.onCookieSaved = function () {
+    refreshCookieStatus();
+    toast("已自动获取移动端抖音登录态并保存");
   };
 
   function renderErrors(results) {
@@ -246,13 +339,26 @@
         '<span class="tag kind">' + escapeHtml(item.kind_name) + "</span>" +
         (item.watermark_free ? '<span class="tag ok">无水印</span>' :
           '<span class="tag">原始文件</span>') +
-        (item.count > 1 ? '<span class="tag">' + item.count + " 张 · zip</span>" : "");
+        (item.count > 1 && !NATIVE ? '<span class="tag">' + item.count + " 张 · zip</span>" :
+          (item.count > 1 ? '<span class="tag">' + item.count + " 张</span>" : ""));
+      // 按条清晰度选择：解析出真实档位（如 蓝光/1080/720/540）时给出下拉，默认最高
+      let qsel = "";
+      if (item.kind === "video" && item.qualities && item.qualities.length) {
+        const labels = item.quality_labels || {};
+        const optsHtml = item.qualities.map((h) =>
+          '<button type="button" class="dd-opt" data-value="' + h + '">' +
+          escapeHtml(labels[h] || (h + "P")) + "</button>").join("");
+        qsel = '<div class="ri-quality"><span>画质</span>' +
+          '<div class="dd q-dd" data-i="' + item.index + '">' +
+          '<button type="button" class="dd-btn" aria-haspopup="listbox"></button>' +
+          '<div class="dd-list" role="listbox">' + optsHtml + "</div></div></div>";
+      }
       return '<div class="result-item">' +
         '<div class="ri-main">' +
           '<div class="ri-thumb"><img loading="lazy" src="' + escapeHtml(thumbHref(item)) +
             '" alt="封面" onerror="this.style.visibility=\'hidden\'"></div>' +
           '<div class="ri-info"><div class="ri-title">' + escapeHtml(item.title) + "</div>" +
-            '<div class="ri-badges">' + badges + "</div></div>" +
+            '<div class="ri-badges">' + badges + "</div>" + qsel + "</div>" +
         "</div>" +
         '<div class="ri-actions">' +
           '<button class="btn btn-sm pv-one" data-i="' + item.index + '">预览</button>' +
@@ -261,8 +367,10 @@
         "</div></div>";
     }).join("");
 
+    initItemQualities();
+
     $("result-tip").textContent = NATIVE
-      ? "点「预览」查看图片或播放视频；点「保存到手机」图片 / 视频直接写入手机相册（DCIM/随手存），图集打包为 zip 存到下载目录。"
+      ? "点「预览」查看图片或播放视频；点「保存到手机」视频 / 单图写入手机相册（DCIM/随手存），图集逐张保存到手机相册。"
       : "点「预览」查看图片或播放视频；点「下载」由浏览器保存。图集自动打包为 zip。" +
         (LAST_ITEMS.length > 1 ? "浏览器若提示允许多个下载，请选择允许。" : "");
 
@@ -343,18 +451,58 @@
   }
 
   async function pasteFromClipboard() {
+    // 1) APK：页面在 http://127.0.0.1（非安全上下文），navigator.clipboard 不可用，
+    //    必须走 Android 原生桥读剪贴板。
+    if (BRIDGE && typeof BRIDGE.readClipboard === "function") {
+      let text = "";
+      try { text = BRIDGE.readClipboard() || ""; } catch (e) { text = ""; }
+      if (text.trim()) { insertPasted(text); return; }
+      toast("剪贴板为空，请先复制分享链接");
+      return;
+    }
+    // 2) PC / 普通浏览器：安全上下文可用时走 Clipboard API
     try {
       const text = await navigator.clipboard.readText();
       if (!text) { toast("剪贴板为空"); return; }
-      const box = $("input");
-      box.value = (box.value.trim() ? box.value.trim() + "\n" : "") + text.trim();
-      updateCount();
-      runDetect();
-      toast("已粘贴 " + text.trim().length + " 个字符");
+      insertPasted(text);
     } catch (e) {
       $("input").focus();
       toast("无法读取剪贴板，请长按输入框粘贴（PC 按 Ctrl+V）");
     }
+  }
+
+  /** 把剪贴板文本追加进输入框并触发识别。 */
+  function insertPasted(text) {
+    const t = (text || "").trim();
+    if (!t) { toast("剪贴板为空"); return; }
+    const box = $("input");
+    box.value = (box.value.trim() ? box.value.trim() + "\n" : "") + t;
+    updateCount();
+    runDetect();
+    toast("已粘贴 " + t.length + " 个字符");
+  }
+
+  // 顶栏文案统一在这里决定，保证与最终确定的 MOBILE 一致。
+  //   PC：随手存 [电脑端] + 完整副标题 + 「已就绪 · vX · 本机」+「可去水印」
+  //   移动：随手存 [Android] + 隐藏副标题 + 仅「vX」版本号（可去水印、底部水印徽标都隐藏）
+  function applyHeader() {
+    const edition = IS_APK ? "Android"
+      : (CFG && CFG.runtime === "android" ? "Android Web" : "电脑端");
+    $("edition").textContent = edition;
+
+    $("subtitle").textContent = MOBILE
+      ? ""
+      : "自动识别平台与类型 · 免 Cookie · 免代理 · 可选去水印 · 结果可预览";
+    $("subtitle").style.display = MOBILE ? "none" : "";
+
+    const ver = (CFG && CFG.version) ? CFG.version : "-";
+    $("state-pill").textContent = MOBILE
+      ? "v" + ver
+      : "已就绪 · v" + ver + " · 本机";
+    $("state-pill").className = "pill ok";
+
+    $("nowm-pill").textContent = MOBILE ? "" : "可去水印";
+    $("nowm-pill").style.display = MOBILE ? "none" : "";
   }
 
   // ------------------------------------------------------------------ //
@@ -365,10 +513,7 @@
     MOBILE = IS_APK || (CFG && CFG.runtime === "android");
     document.body.classList.remove("is-mobile", "is-pc");
     document.body.classList.add(MOBILE ? "is-mobile" : "is-pc");
-    $("edition").textContent = IS_APK ? "Android" : (CFG.runtime === "android" ? "Android Web" : "电脑端");
-    $("subtitle").textContent = MOBILE
-      ? "粘贴链接 · 直接存到手机 · 免 Cookie"
-      : "自动识别平台与类型 · 免 Cookie · 免代理 · 可选去水印 · 结果可预览";
+    applyHeader();
     $("btn-download").textContent = SAVE_LABEL;
     $("btn-download-all").textContent = ALL_LABEL;
     $("btn-preview-download").textContent = NATIVE ? "保存到手机" : "下载此项";
@@ -380,14 +525,13 @@
       $("settings").classList.add("collapsed");
       $("settings-arrow").textContent = "▸";
     }
+    // APK：显示「手机号验证码登录抖音自动获取 Cookie」按钮
+    if (IS_APK && $("btn-dy-login")) $("btn-dy-login").style.display = "";
   }
 
   async function boot() {
     try {
       CFG = await api("/api/config");
-      $("state-pill").textContent = "已就绪 · v" + (CFG.version || "-") + " · 本机";
-      $("state-pill").className = "pill ok";
-      $("nowm-pill").textContent = "可去水印";
       $("platforms").innerHTML = (CFG.platforms || []).map((p) =>
         '<span class="platform-chip">' + escapeHtml(p) + "</span>").join("");
       applyClientUi();
@@ -396,11 +540,41 @@
       setStatus(NATIVE ? "已就绪 · 粘贴链接后点下方按钮，文件直接保存到手机本地"
                        : "已就绪 · 粘贴链接后点下方按钮");
     } catch (e) {
+      applyClientUi();          // 先按端裁剪界面，再落错误状态（否则会被顶栏文案覆盖）
       $("state-pill").textContent = "服务未启动";
       $("state-pill").className = "pill warn";
       setStatus("连不上本机服务：" + e.message);
       toast("无法连接本机服务：" + e.message);
-      applyClientUi();
+    }
+    // APP 内登录获取的抖音登录态：自动填充并提示，避免手动复制；首次还会自动静默探测
+    if (IS_APK) { refreshCookieStatus().then(() => maybeAutoOpenLogin()); }
+  }
+
+  async function refreshCookieStatus() {
+    try {
+      const r = await api("/api/cookie");
+      const box = $("opt-cookie");
+      const status = $("cookie-status");
+      if (r.has_cookie) {
+        if (box && !box.value) box.value = r.cookie;
+        if (status) status.textContent = "✓ 已自动获取移动端抖音登录态，解析抖音时自动使用（有效期由抖音决定，无需手动操作）。";
+      } else if (status) {
+        status.textContent = "系统内不提供登录。若手机上的移动端抖音已登录，点上方按钮即可自动读取登录态（无需输入账号密码）。";
+      }
+      return !!r.has_cookie;
+    } catch (e) { return false; }
+  }
+
+  // APP 端：启动后先静默探测移动端抖音登录态（不弹界面、不打扰）；
+  // 只有确实读不到、且用户从未手动同步过时，才提示可点按钮读取。
+  // 系统内不做任何登录流程。
+  async function maybeAutoOpenLogin() {
+    if (!IS_APK || !BRIDGE) return;
+    const has = await refreshCookieStatus();
+    if (has) return;
+    // 静默探测：后台加载移动端抖音页面读取已有 Cookie（不显示界面）
+    if (typeof BRIDGE.probeDouyinCookie === "function") {
+      try { BRIDGE.probeDouyinCookie(); } catch (e) { /* 忽略 */ }
     }
   }
 
@@ -440,6 +614,16 @@
     toast("桌面端已退出，可以关闭此窗口");
   });
   $("btn-preview-close").addEventListener("click", closePreview);
+  $("btn-dy-login").addEventListener("click", () => {
+    if (BRIDGE && typeof BRIDGE.openDouyinLogin === "function") {
+      try {
+        BRIDGE.openDouyinLogin();
+        toast("正在读取移动端抖音登录态（若手机抖音已登录会自动获取）");
+      } catch (e) { toast("读取失败：" + e.message); }
+    } else {
+      toast("当前环境不支持自动读取，可手动粘贴 Cookie");
+    }
+  });
   $("btn-preview-download").addEventListener("click", () => {
     if (PREVIEW_ITEM) triggerDownload(PREVIEW_ITEM);
   });

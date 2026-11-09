@@ -41,6 +41,11 @@ _MAX_TICKETS = 120
 _TICKETS: dict[str, "Ticket"] = {}
 _LOCK = threading.RLock()
 
+# 结果栏封面缓存：url -> ((bytes, mime), ts)。封面极小、可安全驻留内存，
+# 命中后界面重渲染不再回源（移动端弱网下的主要卡顿来源之一）。
+_THUMB_CACHE: dict[str, tuple[tuple[bytes, str], float]] = {}
+_THUMB_TTL = 600.0
+
 _MIME_EXT = {
     "video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov",
     "video/x-matroska": ".mkv", "video/3gpp": ".3gp",
@@ -77,6 +82,9 @@ class DeliveryItem:
     page_url: str = ""                       # 无直链时交给 yt-dlp 临时下载
     cover: str = ""                          # 封面 / 首图，供结果栏预览
     options: DownloadOptions | None = None
+    # 解析出的真实可选清晰度（按高度降序，如 [1080, 720, 540]）；为空表示源未提供档位
+    qualities: list[int] = field(default_factory=list)
+    quality_variants: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -150,6 +158,9 @@ def _resource_from_entry(entry: MediaEntry, opts: DownloadOptions | None = None)
 
 def item_from_entry(entry: MediaEntry, opts: DownloadOptions) -> DeliveryItem:
     remove_watermark = bool(getattr(opts, "remove_watermark", True))
+    raw = entry.raw or {}
+    variants = [v for v in (raw.get("quality_variants") or []) if v.get("height")]
+    qualities = sorted({int(v.get("height")) for v in variants}, reverse=True)
     return DeliveryItem(
         id=entry.id,
         title=entry.title,
@@ -163,6 +174,8 @@ def item_from_entry(entry: MediaEntry, opts: DownloadOptions) -> DeliveryItem:
         page_url=entry.url,
         cover=str(entry.thumbnail or ""),
         options=opts,
+        qualities=qualities,
+        quality_variants=variants,
     )
 
 
@@ -187,6 +200,13 @@ def create_ticket(entries: list[MediaEntry], opts: DownloadOptions) -> tuple[str
     for index, item in enumerate(items):
         count = len(item.resources) or 1
         remove_watermark = bool(getattr(item.options, "remove_watermark", True))
+        # 画质展示标签：高度 -> 档位名（蓝光 / 1080P / 720P…），无标签时回退为 "1080P"
+        # 同一高度出现多档（如 蓝光 与 1080P 同为 1080）时保留码率最高的一档标签
+        quality_labels = {}
+        for v in item.quality_variants:
+            h = v.get("height")
+            if h and str(h) not in quality_labels:
+                quality_labels[str(h)] = v.get("label") or f"{h}P"
         summary.append({
             "index": index,
             "id": item.id,
@@ -200,6 +220,8 @@ def create_ticket(entries: list[MediaEntry], opts: DownloadOptions) -> tuple[str
             "source": item.source,
             "count": count,
             "mode": "zip" if count > 1 else ("direct" if item.resources else "ytdlp"),
+            "qualities": item.qualities,
+            "quality_labels": quality_labels,
             "download_url": f"/api/fetch?{link}&i={index}",
             "preview_url": f"/api/fetch?{link}&i={index}&j=0&zip=0&preview=1",
             "thumb_url": f"/api/thumb?{link}&i={index}",
@@ -231,6 +253,8 @@ def _session(resource: Resource, platform: str, direct: bool) -> requests.Sessio
         "Referer": resource.referer or "",
         "Accept": "*/*",
         "Accept-Language": "zh-CN,zh;q=0.9",
+        # 媒体直链不接受压缩：避免源站 / 代理下发编码标记错乱的压缩体导致 zlib 解压报错
+        "Accept-Encoding": "identity",
     })
     if resource.headers:
         s.headers.update(resource.headers)
@@ -409,10 +433,44 @@ def _ytdlp_response(item: DeliveryItem) -> Response:
     return Response(generate(), mimetype=ctype, headers=headers)
 
 
+def _apply_quality(item: DeliveryItem, height: int) -> DeliveryItem:
+    """按条覆盖清晰度：从解析出的 quality_variants 里挑选对应高度的直链，
+    重新生成 Resource；无匹配档位时原样返回。
+
+    选定档位后面再挂上其余档位的直链作为回退：移动端弱网下，按 ratio 探测来的
+    「声明档位」可能实际不被源支持，直链会 404；此时自动回退到相邻可用档位，
+    而不是直接报「下载失败」。
+    """
+    chosen = select_quality_url({"quality_variants": item.quality_variants}, str(height))
+    if not chosen or not item.resources:
+        return item
+    urls = [chosen]
+    for v in sorted(item.quality_variants, key=lambda x: abs(int(x.get("height") or 0) - height)):
+        u = v.get("url")
+        if u and u not in urls:
+            urls.append(u)
+    res0 = item.resources[0]
+    return DeliveryItem(
+        id=item.id, title=item.title, kind=item.kind, kind_name=item.kind_name,
+        platform=item.platform, platform_name=item.platform_name,
+        watermark_free=item.watermark_free, source=item.source,
+        resources=[Resource(urls=urls, name=res0.name, referer=res0.referer,
+                            headers=res0.headers, kind="video")],
+        page_url=item.page_url, cover=item.cover, options=item.options,
+        qualities=item.qualities, quality_variants=item.quality_variants,
+    )
+
+
 def fetch(ticket: str, index: int, file_index: int = -1, as_zip: bool = False,
-          preview: bool = False, range_header: str = "") -> Response:
-    """生成下载响应；preview=True 时以 inline 返回，供结果栏预览图片 / 视频。"""
+          preview: bool = False, range_header: str = "", quality_override: int | None = None
+          ) -> Response:
+    """生成下载响应；preview=True 时以 inline 返回，供结果栏预览图片 / 视频。
+
+    quality_override 为按条选定的清晰度高度（如 1080），为空时沿用全局「画质上限」。
+    """
     item = get_item(ticket, index)
+    if quality_override and item.kind == "video" and item.quality_variants:
+        item = _apply_quality(item, quality_override)
     if not item.resources:
         return _ytdlp_response(item)
     if preview:
@@ -450,7 +508,12 @@ _BLANK_PNG = _blank_png()
 
 
 def fetch_thumbnail(ticket: str, index: int) -> Response:
-    """结果栏封面：优先解析结果自带的封面，图集则用第一张图。"""
+    """结果栏封面：优先解析结果自带的封面，图集则用第一张图。
+
+    带进程内缓存：结果栏每次重渲染（切换选项、追加结果）都会再请求一遍封面，
+    移动端弱网下这会累积成明显的界面卡顿。封面在本机缓存后重复请求直接命中内存，
+    并允许 WebView 侧短暂缓存（Cache-Control: private, max-age）。
+    """
     item = get_item(ticket, index)
     resource: Resource | None = None
     if item.cover:
@@ -460,6 +523,12 @@ def fetch_thumbnail(ticket: str, index: int) -> Response:
         resource = item.resources[0]
     if not resource:
         return Response(_BLANK_PNG, mimetype="image/png")
+
+    key = resource.urls[0] if resource.urls else ""
+    hit = _THUMB_CACHE.get(key)
+    if hit and (time.time() - hit[1]) < _THUMB_TTL:
+        return Response(hit[0][0], mimetype=hit[0][1],
+                        headers={"Cache-Control": "private, max-age=600"})
 
     resp = None
     session = None
@@ -480,5 +549,9 @@ def fetch_thumbnail(ticket: str, index: int) -> Response:
             session.close()
     if not data or not media_type.startswith("image/"):
         return Response(_BLANK_PNG, mimetype="image/png")
+    if key:
+        if len(_THUMB_CACHE) > 200:
+            _THUMB_CACHE.pop(next(iter(_THUMB_CACHE)), None)
+        _THUMB_CACHE[key] = ((data, media_type), time.time())
     return Response(data, mimetype=media_type,
-                    headers={"Cache-Control": "no-store"})
+                    headers={"Cache-Control": "private, max-age=600"})

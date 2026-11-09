@@ -206,14 +206,22 @@ def expand_shortlink(url: str, timeout: float = 10.0, session: requests.Session 
     if host not in _SHORT_HOSTS and not any(host.endswith("." + h) for h in _SHORT_HOSTS):
         return url, False
     sess = session or requests.Session()
-    headers = {"User-Agent": MOBILE_UA, "Accept-Language": "zh-CN,zh;q=0.9"}
+    # Accept-Encoding: identity —— 短链服务器 / 代理偶发下发编码标记错乱的压缩体，
+    # raw.read(decode_content=True) 会抛出 zlib.error（且不属于 requests.RequestException，
+    # 会穿透整个解析链路，前端表现为 "Error -3 while decompressing data"）。
+    # 直接声明不接受压缩，从源头规避解压这一步。
+    headers = {"User-Agent": MOBILE_UA, "Accept-Language": "zh-CN,zh;q=0.9",
+               "Accept-Encoding": "identity"}
     try:
         resp = sess.get(url, headers=headers, timeout=timeout, allow_redirects=True, stream=True)
         final = resp.url
         html = ""
         if "text/html" in resp.headers.get("Content-Type", ""):
-            raw = resp.raw.read(262144, decode_content=True) if hasattr(resp.raw, "read") else b""
-            html = raw.decode("utf-8", errors="ignore")
+            try:
+                raw = resp.raw.read(262144, decode_content=True) if hasattr(resp.raw, "read") else b""
+                html = raw.decode("utf-8", errors="ignore")
+            except Exception:                          # noqa: BLE001 - 解压失败只丢 HTML，不丢短链
+                html = ""
         resp.close()
         if html:
             target = _js_redirect(html, final)
@@ -221,7 +229,7 @@ def expand_shortlink(url: str, timeout: float = 10.0, session: requests.Session 
                 final = target
         final = _clean_url(final) or url
         return final, final != url
-    except requests.RequestException:
+    except Exception:                                  # noqa: BLE001 - 任何失败都原样返回，解析器自行展开
         return url, False
 
 

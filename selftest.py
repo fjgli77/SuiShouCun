@@ -305,7 +305,11 @@ def test_extractor() -> None:
     if has_ffmpeg():
         check("有 ffmpeg 时使用分离流合并", "+ba" in fallback, fallback)
     else:
-        check("无 ffmpeg 时自动降级单文件", fallback == "b", fallback)
+        # 无 ffmpeg：必须逐级回退（带音轨单文件 -> 视频轨 -> 任意），
+        # 写死 "b" 会让 B 站等只有分离轨的站点直接报 "Requested format is not available"
+        check("无 ffmpeg 时自动降级单文件 b[acodec!=none]/bv*[acodec!=none]/b/bv*/best",
+              "b[acodec!=none]" in fallback and "/bv*" in fallback and fallback.endswith("/best"),
+              fallback)
 
 
 def test_mobile_feed(base: str, outdir: Path) -> None:
@@ -471,7 +475,7 @@ def test_web_api(base: str, outdir: Path) -> list[dict]:
     cfg = client.get("/api/config").get_json()
     check("配置接口可用", "outdir" in cfg and "ffmpeg" in cfg)
     check("配置声明 v6 单应用运行时与免 Cookie",
-          cfg.get("version") == "6.0" and cfg.get("nocookie") is True
+          cfg.get("version") in ("6.0", "6.1") and cfg.get("nocookie") is True
           and cfg.get("runtime") in ("pc", "android")
           and not any(k in cfg for k in ("access_token", "apk_key", "qr_url", "lan_urls")),
           repr(cfg)[:250])
@@ -610,7 +614,7 @@ def test_browser_download(base: str, client, outdir: Path) -> None:
     cfg = client.get("/api/config").get_json()
     check("配置声明浏览器下载 / 预览 / 去水印 / v6.0",
           cfg.get("browser_download") is True and cfg.get("watermark_free") is True
-          and cfg.get("version") == "6.0" and cfg.get("preview") is True,
+          and cfg.get("version") in ("6.0", "6.1") and cfg.get("preview") is True,
           repr(cfg)[:220])
 
     before = {str(p) for p in _DEFAULT_OUTDIR.rglob("*") if p.is_file()}
@@ -811,9 +815,11 @@ def test_v6(client, base: str, outdir: Path) -> None:
               and "assets/py/app/media_dl/web/index.html" in names
               and "assets/py/app/media_dl/web/app.js" in names)
         check("APK 内含 CPython 与原生扩展模块",
+              # 运行时 .so 随 lib/ 打包；标准库 C 扩展改由 assets/py/native/<ABI>/
+              # 打包，运行时解压到 lib-dynload（见 android/build_apk.py）
               "lib/arm64-v8a/libpython3.13.so" in names
               and "lib/arm64-v8a/libpystart.so" in names
-              and any(n.startswith("lib/arm64-v8a/_socket.") for n in names))
+              and any(n.startswith("assets/py/native/arm64-v8a/_socket.") for n in names))
         check("APK 内含纯 Python 依赖",
               "assets/py/site/flask/__init__.py" in names
               and "assets/py/site/yt_dlp/__init__.py" in names
@@ -866,6 +872,38 @@ def test_v6(client, base: str, outdir: Path) -> None:
     check("两端共用同一套 API，无连接层残留",
           "native_download" in client.get("/api/config").get_json()
           and "media_dl_server" not in js)
+
+    # ---- 3b. 移动端抖音登录态：系统内不自建登录，只读取移动端已有登录态 ----
+    check("登录态只从移动端抖音读取（系统内不提供登录流程）",
+          "DY_MOBILE_URL" in java and "m.douyin.com" in java
+          and "验证码登录" not in java and "OPEN_LOGIN_JS" not in java)
+    check("读取抖音前先 flush Cookie 落盘",
+          "CookieManager.getInstance().flush()" in java)
+    check("登录态判定只认真实会话键（排除匿名会话字段）",
+          'new String[]{"sessionid_ss", "sessionid", "sid_tt", "sid_guard"}' in java)
+    check("支持静默探测移动端登录态（免打扰）",
+          "probeDouyinCookieSilently" in java and "probeDouyinCookie" in js)
+    check("捕获到的登录态回写本机服务自动使用",
+          "/api/set-cookie" in java and "/api/cookie" in js
+          and "onCookieSaved" in js)
+
+    # ---- 3b-2. JS 桥回调必须切回主线程（否则 new WebView throw IllegalStateException 闪退） ----
+    # @JavascriptInterface 方法运行在 WebView 的 JavaBridge 线程；在其中直接创建 View
+    # 会抛「Calling View methods on another thread than the UI thread」导致应用启动即闪退。
+    _bridge = java.split("class JsBridge", 1)[-1].split("\n    }", 1)[0]
+    check("JS 桥 probeDouyinCookie 切回主线程",
+          "public void probeDouyinCookie()" in _bridge
+          and "runOnUiThread" in _bridge.split("probeDouyinCookie()")[1][:220])
+    check("JS 桥 openDouyinLogin 切回主线程",
+          "public void openDouyinLogin()" in _bridge
+          and "runOnUiThread" in _bridge.split("openDouyinLogin()")[1][:220])
+    check("openDouyinWeb 内部主线程兜底（防任意调用方误用）",
+          "Looper.myLooper() != android.os.Looper.getMainLooper()" in java)
+
+    # ---- 3c. 移动端剪贴板：非安全上下文下走原生桥 ----
+    check("移动端粘贴走原生剪贴板桥",
+          "readClipboard" in java and "ClipboardManager" in java
+          and "readClipboard" in js)
 
     # ---- 4. B站番剧不再被封面误判成图片 ----
     ep = "https://www.bilibili.com/bangumi/play/ep321808/?share_source=copy_web"

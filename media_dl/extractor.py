@@ -40,7 +40,15 @@ def parse_text(text: str, options: DownloadOptions | None = None) -> list[ParseR
     """解析任意文本（可包含整段分享口令、多行链接、短链）。"""
     opts = (options or DownloadOptions()).normalized()
     links = prepare(text, expand=opts.expand_shortlinks, timeout=opts.timeout)
-    return [parse_link(link, opts) for link in links]
+    results: list[ParseResult] = []
+    for link in links:
+        try:
+            results.append(parse_link(link, opts))
+        except Exception as exc:                    # noqa: BLE001 - 单条失败不拖垮整批解析
+            bad = ParseResult(link=link)
+            bad.error = _brief(exc)
+            results.append(bad)
+    return results
 
 
 def parse_link(link: Link, options: DownloadOptions | None = None) -> ParseResult:
@@ -72,7 +80,7 @@ def _parse_link_impl(link: Link, options: DownloadOptions | None = None) -> Pars
     # 2. 免 Cookie 解析（抖音 / 快手优先，yt-dlp 对这两家支持有限）
     if link.platform in ("douyin", "kuaishou"):
         try:
-            entries = parse_nocookie(link, opts)
+            entries = parse_nocookie(link, opts, warnings=result.warnings)
         except Exception as exc:                       # noqa: BLE001
             entries = []
             result.warnings.append(f"免登录解析未成功：{_brief(exc)}")
@@ -93,6 +101,17 @@ def _parse_link_impl(link: Link, options: DownloadOptions | None = None) -> Pars
         if bangumi:
             result.entries = [bangumi]
             result.warnings.append("B站番剧公开接口解析成功（免 Cookie）")
+            return result
+        if why:
+            result.warnings.append(why)
+
+    # 3b. B站普通视频：走 durl 渐进式接口直接拿「含音轨的单文件 MP4」，
+    #     不依赖 ffmpeg 合并（yt-dlp 在无 ffmpeg 时对 B站 会直接失败）
+    if link.platform == "bilibili" and "/video/" in link.url:
+        bili, why = _bilibili_video(link, opts)
+        if bili:
+            result.entries = [bili]
+            result.warnings.append("B站视频公开接口解析成功（免 Cookie 直链）")
             return result
         if why:
             result.warnings.append(why)
@@ -171,6 +190,111 @@ def _is_definite_video_page(link: Link) -> bool:
     if _DEFINITE_VIDEO.search(link.url):
         return True
     return link.platform == "bilibili" and link.kind == "video"
+
+
+def _bilibili_video(link: Link, opts: DownloadOptions) -> tuple[MediaEntry | None, str]:
+    """B站普通视频（/video/BVxxx）：web-interface/view 拿 cid，playurl 走
+    fnval=1 的 durl 通道，直接返回**含音轨的单文件 MP4**，无需 ffmpeg 合并。
+
+    这是「本机未安装 ffmpeg」时唯一可用的高画质方案：
+      - dash（fnval=16）只给分离的视频轨 + 音频轨，没有 ffmpeg 无法合并；
+      - durl（fnval=1）给渐进式单文件（含音轨），可直接下载播放。
+    匿名只下发 720P/360P；带登录 Cookie 时可达 1080P（本函数自动复用 opts.cookie）。
+
+    返回 (条目, 失败原因)。失败原因用于上层给出准确提示。
+    """
+    m = re.search(r"/video/(BV[0-9A-Za-z]+)", link.url)
+    if not m:
+        return None, ""
+    bvid = m.group(1)
+    headers = {"User-Agent": DESKTOP_UA, "Referer": "https://www.bilibili.com/",
+               "Accept": "application/json"}
+    proxies = {"http": opts.proxy, "https": opts.proxy} if opts.proxy else None
+    cookie = getattr(opts, "cookie", "") or ""
+    if cookie:
+        headers["Cookie"] = cookie
+    try:
+        view = requests.get(
+            "https://api.bilibili.com/x/web-interface/view",
+            params={"bvid": bvid}, headers=headers, timeout=min(opts.timeout, 15),
+            proxies=proxies,
+        ).json()
+    except Exception as exc:                        # noqa: BLE001
+        return None, f"B站视频信息接口不可用：{_brief(exc)}"
+    if str(view.get("code") or 0) not in ("0", ""):
+        return None, (f"B站视频接口返回 {view.get('code')}："
+                      f"{str(view.get('message') or '无权限')[:60]}")
+    data = view.get("data") or {}
+    cid = str(data.get("cid") or "")
+    if not cid:
+        return None, "B站视频信息里没有 cid（可能是合集 / 已失效）"
+    title = safe_filename(str(data.get("title") or "") or "bilibili_video", 90)
+    cover = str(data.get("pic") or "")
+    duration = data.get("duration") or None
+
+    # 画质阶梯：优先 1080P（80）→ 720P（64）→ 480P（32）→ 360P（16）
+    urls: list[str] = []
+    quality = 0
+    last_code: Any = ""
+    for qn in (80, 64, 32, 16):
+        try:
+            play = requests.get(
+                "https://api.bilibili.com/x/player/playurl",
+                params={"bvid": bvid, "cid": cid, "qn": qn, "fnval": 1, "fnver": 0,
+                        "fourk": 1, "otype": "json"},
+                headers={**headers, "Referer": link.url},
+                timeout=min(opts.timeout, 15), proxies=proxies,
+            ).json()
+        except Exception as exc:                    # noqa: BLE001
+            last_code = _brief(exc)
+            continue
+        last_code = play.get("code")
+        pdata = play.get("data") or {}
+        durls = pdata.get("durl") or []
+        for d in durls:
+            u = str(d.get("url") or "")
+            if u.startswith("http"):
+                urls.append(u)
+            backup = d.get("backup_url")
+            if isinstance(backup, str) and backup.startswith("http"):
+                urls.append(backup)
+            elif isinstance(backup, list):
+                urls.extend(str(x) for x in backup if str(x).startswith("http"))
+        if urls:
+            quality = int(pdata.get("quality") or qn)
+            break
+    urls = [u for u in urls if u.startswith("http")]
+    if not urls:
+        hint = "可能需要登录 / 大会员或地区限制" if not cookie else "该视频暂无可下载的清晰度"
+        return None, (f"B站播放地址未返回视频流（code={last_code}，{hint}）；"
+                      "可在「下载设置 → 抖音登录态 Cookie」填入已登录 B站的 Cookie 后重试获取更高画质")
+
+    qlabel = {120: "4K", 116: "1080P60", 112: "1080P+", 80: "1080P",
+              64: "720P", 32: "480P", 16: "360P"}.get(quality, f"{quality}")
+    entry = MediaEntry(
+        id=_stable_id(f"{link.url}#{cid}"),
+        title=title,
+        kind="video",
+        url=link.url,
+        platform=link.platform,
+        platform_name=link.platform_name,
+        thumbnail=cover,
+        duration=duration,
+        raw={
+            "source": "bilibili-durl",
+            "direct_video_url": urls[0],
+            "video_urls": urls[:4],
+            "ytdlp_headers": {"Referer": "https://www.bilibili.com/",
+                              "User-Agent": DESKTOP_UA},
+            "referer": "https://www.bilibili.com/",
+            "watermark_free": True,
+            "channel": "bili-durl",
+            "quality": qlabel,
+            "quality_variants": [{"height": quality, "label": qlabel,
+                                  "url": urls[0], "ext": "mp4"}],
+        },
+    )
+    return entry, ""
 
 
 def _bilibili_bangumi(link: Link, opts: DownloadOptions) -> tuple[MediaEntry | None, str]:
@@ -422,6 +546,8 @@ def fetch_page(url: str, link: Link, opts: DownloadOptions) -> tuple[str, str, s
         "User-Agent": MOBILE_UA if link.platform in ("douyin", "kuaishou", "xiaohongshu") else DESKTOP_UA,
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Referer": url,
+        # 不接受压缩响应，规避源站 / 代理下发编码错乱压缩体时的裸 zlib.error
+        "Accept-Encoding": "identity",
     })
     if opts.cookie_file:
         try:
@@ -430,6 +556,8 @@ def fetch_page(url: str, link: Link, opts: DownloadOptions) -> tuple[str, str, s
             session.cookies = jar
         except Exception:                          # noqa: BLE001
             pass
+    elif getattr(opts, "cookie", ""):
+        session.headers["Cookie"] = opts.cookie
     proxies = {"http": opts.proxy, "https": opts.proxy} if opts.proxy else None
     try:
         resp = session.get(url, timeout=opts.timeout, proxies=proxies, allow_redirects=True)
@@ -445,6 +573,9 @@ def fetch_page(url: str, link: Link, opts: DownloadOptions) -> tuple[str, str, s
             resp = direct.get(url, timeout=opts.timeout, allow_redirects=True)
             resp.raise_for_status()
             body, final_url = resp.text, resp.url
+        except Exception:                          # noqa: BLE001 - 直连也失败则返回空页，由上层兜底
+            direct.close()
+            return "", url, ""
         finally:
             direct.close()
     finally:

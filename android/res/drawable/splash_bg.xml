@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  冷启动背景（窗口级启动界面）。
+  进程被拉起、Activity 还没 inflate 内容之前，系统先用 windowBackground 铺满屏幕；
+  不设置时默认是主题白底，会「白闪一下」再进深色界面。这里换成与 App 一致的深色底 +
+  居中图标，视觉上就是从启动画面顺滑过渡到「正在启动本机服务…」。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splash_bg" />
+    <item android:gravity="center">
+        <bitmap android:src="@mipmap/ic_launcher" android:gravity="center" />
+    </item>
+</layer-list>

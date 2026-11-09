@@ -23,7 +23,7 @@ from .nocookie import parse_nocookie
 from .options import DownloadOptions, has_ffmpeg
 from .qr import qr_svg
 
-__version__ = "6.0.0"
+__version__ = "6.1.0"
 
 __all__ = [
     "download_text", "download_parsed", "download_entry", "iter_files",

@@ -83,6 +83,13 @@
           <label class="check"><input type="checkbox" id="opt-page-images" checked> 网页图片兜底提取</label>
           <label class="check"><input type="checkbox" id="opt-expand" checked> 自动展开短链</label>
         </div>
+        <label class="field col cookie-field">
+          <span>抖音登录态 Cookie（可选）</span>
+          <button type="button" class="btn btn-sm apk-login-btn" id="btn-dy-login" style="display:none">📱 读取移动端抖音登录态（若已登录则自动获取）</button>
+          <textarea id="opt-cookie" rows="2" spellcheck="false" placeholder="仅本机保存，绝不上传。用于免 Cookie 通道取不到的抖音图文 / 登录作品。&#10;在抖音网页版按 F12 → Network → 复制任意请求的 Cookie 请求头内容，粘贴到这里"></textarea>
+          <small class="hint">仅用于免 Cookie 通道取不到的抖音图文 / 登录作品；其余仍免 Cookie。Cookie 只发往抖音，不上传到任何服务器。</small>
+          <small class="hint cookie-status" id="cookie-status"></small>
+        </label>
       </div>
     </section>
 
