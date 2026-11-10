@@ -9,6 +9,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re as _re
 import shutil
 import struct
 import sys
@@ -39,6 +40,12 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     else:
         FAILED += 1
         print(f"  [FAIL] {name} {detail}")
+
+
+def _truth_version() -> str:
+    """从唯一真源读短版本号，供断言比对（避免自检里再抄一份版本号）。"""
+    from media_dl.version import __version_short__
+    return __version_short__
 
 
 def make_png(width: int = 64, height: int = 64) -> bytes:
@@ -483,7 +490,7 @@ def test_web_api(base: str, outdir: Path) -> list[dict]:
     cfg = client.get("/api/config").get_json()
     check("配置接口可用", "outdir" in cfg and "ffmpeg" in cfg)
     check("配置声明 v6 单应用运行时与免 Cookie",
-          cfg.get("version") in ("6.0", "6.1") and cfg.get("nocookie") is True
+          cfg.get("version") == _truth_version() and cfg.get("nocookie") is True
           and cfg.get("runtime") in ("pc", "android")
           and not any(k in cfg for k in ("access_token", "apk_key", "qr_url", "lan_urls")),
           repr(cfg)[:250])
@@ -620,9 +627,9 @@ def test_browser_download(base: str, client, outdir: Path) -> None:
     from media_dl.server import _DEFAULT_OUTDIR
 
     cfg = client.get("/api/config").get_json()
-    check("配置声明浏览器下载 / 预览 / 去水印 / v6.0",
+    check("配置声明浏览器下载 / 预览 / 去水印 / v6",
           cfg.get("browser_download") is True and cfg.get("watermark_free") is True
-          and cfg.get("version") in ("6.0", "6.1") and cfg.get("preview") is True,
+          and cfg.get("version") == _truth_version() and cfg.get("preview") is True,
           repr(cfg)[:220])
 
     before = {str(p) for p in _DEFAULT_OUTDIR.rglob("*") if p.is_file()}
@@ -803,6 +810,7 @@ def test_v6(client, base: str, outdir: Path) -> None:
     manifest = Path("android/AndroidManifest.xml").read_text(encoding="utf-8")
     entry = Path("media_dl/android_entry.py").read_text(encoding="utf-8")
     server_src = Path("media_dl/server.py").read_text(encoding="utf-8")
+    app_state_src = Path("media_dl/app_state.py").read_text(encoding="utf-8")
     apk_src = Path("android/build_apk.py").read_text(encoding="utf-8")
     check("APK 内嵌 CPython 并启动同一个 Flask 服务",
           "PyService.nativeStart" in java and "Py_InitializeFromConfig" in jni
@@ -939,12 +947,17 @@ def test_v6(client, base: str, outdir: Path) -> None:
 
     # ---- 5. 版本号单一真源（IT A-4）：不再三处各写一份 ----
     from media_dl import __version__, __version_code__, __version_short__
-    check("版本号单一真源集中定义",
-          __version__ == "6.1.0" and __version_short__ == "6.1" and isinstance(__version_code__, int),
+    # 断言「三处一致 + 格式合法」，而不是钉死某个具体数字 ——
+    # 否则每次发版都要改自检，反而逼着人绕过它。
+    check("版本号单一真源三处自洽（major.minor[.patch] / 短号为其前缀 / code 为整数）",
+          __version__.startswith(__version_short__ + ".")
+          and _re.fullmatch(r"\d+(\.\d+)+", __version__) is not None
+          and _re.fullmatch(r"\d+(\.\d+)+", __version_short__) is not None
+          and isinstance(__version_code__, int) and __version_code__ > 0,
           f"{__version__} / {__version_short__} / {__version_code__}")
     check("服务端版本号取自真源（非硬编码字面量）",
           'from .version import __version_short__' in server_src
-          and '"version": "6.1"' not in server_src,
+          and not _re.search(r'"version"\s*:\s*"\d', server_src),
           "")
     check("构建脚本从真源注入清单版本号",
           "read_version" in apk_src and "render_manifest" in apk_src
@@ -1021,7 +1034,7 @@ def test_v6(client, base: str, outdir: Path) -> None:
           ".library-list" in css and ".lib-item" in css and ".lib-ico" in css,
           "")
 
-    # ---- 10. 首启依赖引导（IT B-2）----
+    # ---- 10. 首启依赖引导（IT B-2 → 迭代 D：只在第一次进入时出现）----
     check("首启引导卡片存在且只在需要时出现",
           "guide-card" in page and "guide-body" in page and "btn-guide-close" in page,
           "")
@@ -1029,8 +1042,17 @@ def test_v6(client, base: str, outdir: Path) -> None:
           "renderGuide" in js and "CFG.ffmpeg" in js
           and "ffmpeg" in js and "不上传" in js,
           "")
-    check("引导用 localStorage 记住已读，不反复打扰",
-          "GUIDE_SEEN_KEY" in js and "markGuideSeen" in js and "guideSeen" in js,
+    check("引导以服务端 first_run 为准（换版本 / 清缓存后不再弹出）",
+          "CFG.first_run" in js and "isFirstRun" in js
+          and "/api/first-run-done" in js,
+          "")
+    check("缺 ffmpeg 不再每次弹卡，改为设置区低调提示 + 可随时回看",
+          "renderFfmpegHint" in js and "ffmpeg-hint" in page
+          and "openGuideManually" in js and "btn-help" in page,
+          "")
+    check("首启状态落盘在持久目录（不随包目录被清空）",
+          "def state_dir" in app_state_src and "MEDIADL_HOME" in app_state_src
+          and "LOCALAPPDATA" in app_state_src and "frozen" in app_state_src,
           "")
 
     # ---- 11. 移动端前台服务保活（IT B-3）----
@@ -1101,8 +1123,206 @@ def test_v6(client, base: str, outdir: Path) -> None:
           _ss.read_secret(_t) == "sessionid=LEGACY",
           "")
 
+    # ---- 14. 已下载列表默认收起（IT C-1）----
+    _sw = (Path(__file__).resolve().parent / "media_dl" / "web" / "sw.js").read_text(encoding="utf-8")
+    _sw_served = client.get("/sw.js").data.decode("utf-8")
+    _server = (Path(__file__).resolve().parent / "media_dl" / "server.py").read_text(encoding="utf-8")
+    check("媒体库主体默认收起（body 有 collapsed，箭头为 ▸）",
+          "library-body" in page and 'class="library-body collapsed"' in page
+          and 'id="library-arrow"' in page and "▸" in page,
+          "")
+    check("媒体库标题栏可点且带无障碍状态",
+          'id="library-head"' in page and "card-head clickable" in page
+          and 'aria-expanded="false"' in page and 'aria-controls="library-body"' in page,
+          "")
+    check("媒体库展开态可记忆（localStorage）",
+          "media_dl_library_open" in js and "setLibraryOpen" in js
+          and "libraryOpen" in js,
+          "")
+    check("工具栏按钮唤起媒体库并展开",
+          "toggleLibrary" in js and "library-head" in js
+          and "toggleLibraryOpen" in js,
+          "")
+    check("下载完成后仅在展开时刷新媒体库（不打扰）",
+          "if (libraryOpen()) refreshLibrary(false);" in js,
+          "")
+
+    # ---- 15. 移动端下载并发治理（IT C-2）----
+    check("原生下载有并发上限与排队队列",
+          "NATIVE_CONCURRENCY" in js and "nativeQueue" in js
+          and "pumpNativeQueue" in js and "enqueueNative" in js,
+          "")
+    check("并发上限为 3（避免图集一次性打满线程池）",
+          "const NATIVE_CONCURRENCY = 3;" in js,
+          "")
+    check("排队项显示「排队中」而非直接开始",
+          "排队中" in js and 'status: "pending"' in js,
+          "")
+    check("原生下载终态释放并发位并启动下一个",
+          "releaseNativeSlot" in js and js.count("releaseNativeSlot(") >= 4,
+          f"count={js.count('releaseNativeSlot(')}")
+    check("排队中的项可被取消且不启动",
+          "nativeCancelled" in js and "已取消排队项" in js,
+          "")
+
+    # ---- 16. 画质语义澄清 + 无障碍 + PWA 缓存版本化（IT C-3）----
+    check("全局画质项改名为「默认画质」并说明与逐条覆盖的层级",
+          "默认画质" in page and "覆盖此默认值" in page and "画质上限" not in page,
+          "")
+    check("toast 与状态条有 aria-live（读屏可播报）",
+          'aria-live="polite"' in page and page.count('aria-live="polite"') >= 2,
+          f"count={page.count('aria-live')}")
+    check("已下载列表声明为列表语义",
+          'role="list"' in page and "role=\"listitem\"" in js,
+          "")
+    check("可折叠卡片头带 role=button 与 aria-expanded",
+          'role="button"' in page and page.count("aria-expanded") >= 2,
+          f"count={page.count('aria-expanded')}")
+    check("sw.js 缓存名改为构建/服务端注入版本",
+          "__VERSION__" in _sw and 'CACHE = "media-dl-__VERSION__"' in _sw,
+          "")
+    check("服务端返回 sw.js 时注入真实版本号",
+          "__VERSION__" in _server and "src.replace(\"__VERSION__\"" in _server,
+          "")
+    check("对外 sw.js 已注入真实版本（不再含占位符）",
+          "__VERSION__" not in _sw_served and "media-dl-" in _sw_served,
+          _sw_served.split("CACHE = ", 1)[-1].split(";", 1)[0])
+
+    # ---- 17. 布局不横向溢出（真实缺陷回归守卫）----
+    # 现象：移动端「下载任务」里一条长标题把整张页面顶宽，整页错位、文字被裁成半句。
+    # 根因：grid / flex 子项的自动最小尺寸 = min-content，nowrap 长文本的 min-content
+    # 等于其像素宽度，于是 396px 的列表被顶到 718px，页面横向溢出 291px。
+    # 守卫：所有可能吃长文本的网格/弹性容器必须有 min-width:0，且标题在移动端折行。
+    def _all_rules() -> list[tuple[list[str], str]]:
+        """扫描整张样式表，返回 [(选择器列表, 声明块内容), ...]。
+        手写扫描而不用正则：CSS 有 @media 嵌套，且嵌套量词正则在长文件上会指数回溯。"""
+        # 先去掉注释，否则紧邻选择器的 /* ... */ 会被并进选择器文本
+        src, rules = _re.sub(r"/\*.*?\*/", "", css, flags=_re.S), []
+        i, n = 0, len(src)
+        sel_start = 0
+        while i < n:
+            ch = src[i]
+            if ch == "{":
+                sels = [s.strip() for s in src[sel_start:i].split(",") if s.strip()]
+                depth, j = 1, i + 1
+                while j < n and depth:
+                    if src[j] == "{":
+                        depth += 1
+                    elif src[j] == "}":
+                        depth -= 1
+                    j += 1
+                rules.append((sels, src[i + 1:j - 1]))
+                i = j
+                sel_start = j
+                continue
+            if ch == "}":
+                sel_start = i + 1
+            i += 1
+        return rules
+
+    _RULES = _all_rules()
+
+    def _rule(selector: str) -> str:
+        """取出匹配该选择器的全部声明块（同一选择器可能在多处分别声明）。"""
+        blocks = [selector + " {" + decls + "}"
+                  for sels, decls in _RULES if selector in sels]
+        return "\n".join(blocks)
+
+    for sel in (".jobs-list", ".result-list", ".library-list"):
+        check(f"{sel} 声明 min-width:0（长标题不会顶宽栅格）",
+              "min-width: 0" in _rule(sel), _rule(sel).replace("\n", " ")[:70])
+    for sel in (".job-item", ".result-item", ".lib-item"):
+        check(f"{sel} 声明 min-width:0 与 max-width:100%",
+              "min-width: 0" in _rule(sel) and "max-width: 100%" in _rule(sel),
+              _rule(sel).replace("\n", " ")[:70])
+    check("任务行 .job-top 声明 min-width:0",
+          "min-width: 0" in _rule(".job-top"), "")
+    check("任务标题 .job-title 可收缩（flex:1 1 auto + min-width:0）",
+          "min-width: 0" in _rule(".job-title") and "flex: 1 1 auto" in _rule(".job-title"),
+          "")
+    check("任务行的状态徽标与取消按钮不被压缩（flex:none）",
+          all("flex: none" in _rule(s)
+              for s in (".job-top .tag", ".job-top .job-cancel")), "")
+    check("移动端任务标题折行并最多两行（不再裁成半句）",
+          "body.is-mobile .job-title" in css
+          and "-webkit-line-clamp: 2" in _rule("body.is-mobile .job-title")
+          and "word-break: break-word" in _rule("body.is-mobile .job-title"),
+          "")
+    check("超长不可断字符串有 overflow-wrap 兜底",
+          "overflow-wrap: anywhere" in css, "")
+
+    # ---- 18. 首启只出现一次（迭代 D）----
+    # 现象：每次打开都弹「开始使用」，关不掉。
+    # 根因一：状态写在 localStorage，而 APK 每次换版本会清 WebView 数据；
+    # 根因二：渲染条件写成「未缺 ffmpeg 才跳过」，于是缺 ffmpeg 的机器每次必弹。
+    # 守卫：状态由服务端持久目录承载，接口可读可写，且跨「重启」后仍记得。
+    from media_dl import app_state, server
+
+    check("配置接口暴露 first_run 字段",
+          "first_run" in client.get("/api/config").get_json(), "")
+    check("提供首启完成接口且限本机",
+          "/api/first-run-done" in server_src
+          and server_src.count("def api_first_run_done") == 1,
+          "")
+    check("Cookie 存储已迁到持久目录（不再随包目录被清空）",
+          "app_state.state_dir()" in server_src
+          and "_COOKIE_STORE = _DATA_DIR" in server_src,
+          "")
+
+    # 真跑一遍「首次 → 标记 → 重启后仍记得」的完整生命周期
+    state_dir = app_state.state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "state.json"
+    backup = state_file.read_text(encoding="utf-8") if state_file.exists() else None
+    try:
+        if state_file.exists():
+            state_file.unlink()
+        app_state.reset_cache()
+        check("全新安装：first_run 为真（会显示开始使用）",
+              app_state.is_first_run() is True, "")
+        check("接口在全新安装时返回 first_run=true",
+              client.get("/api/config").get_json().get("first_run") is True, "")
+
+        resp = client.post("/api/first-run-done", json={})
+        check("标记接口返回成功且置为 false",
+              resp.status_code == 200 and resp.get_json().get("first_run") is False,
+              repr(resp.get_json()))
+
+        # 模拟进程重启：丢掉内存缓存，重新从磁盘读
+        app_state.reset_cache()
+        check("重启后仍然记得已引导（不再显示开始使用）",
+              app_state.is_first_run() is False
+              and client.get("/api/config").get_json().get("first_run") is False,
+              "")
+        check("状态确实落到了磁盘文件",
+              state_file.exists() and "first_run_done" in state_file.read_text(encoding="utf-8"),
+              "")
+        check("重复标记幂等（再点一次不报错、不改变结果）",
+              client.post("/api/first-run-done", json={}).status_code == 200
+              and app_state.first_run_done() is True,
+              "")
+    finally:
+        if backup is not None:
+            state_file.write_text(backup, encoding="utf-8")
+        elif state_file.exists():
+            state_file.unlink()
+        app_state.reset_cache()
+
+    # 目录解析：三种部署形态都不能落在会被清空的包目录
+    check("Android 的持久目录取 MEDIADL_HOME 上一级（避开版本重建）",
+          'Path(home).expanduser().parent / "data"' in app_state_src, "")
+    check("EXE 的持久目录取 LOCALAPPDATA（避开 onefile 临时目录）",
+          "LOCALAPPDATA" in app_state_src and '"SuiShouCun"' in app_state_src, "")
+    check("写入采用临时文件 + 原子替换（断电不留半截 JSON）",
+          "os.replace" in app_state_src and '".tmp"' in app_state_src, "")
+
 
 def main() -> int:
+    # 隔离持久状态：自检不碰真实安装目录里的首启标记 / Cookie。
+    # 必须在第一次 import media_dl.server 之前设置（server 在导入时解析 _DATA_DIR）。
+    _data_dir = Path(tempfile.mkdtemp(prefix="media_dl_selftest_data_"))
+    os.environ["MEDIADL_DATA"] = str(_data_dir)
+
     server, port = start_local_server()
     base = f"http://127.0.0.1:{port}"
     outdir = Path(tempfile.mkdtemp(prefix="media_dl_selftest_"))
@@ -1128,6 +1348,7 @@ def main() -> int:
         server.shutdown()
         server.server_close()
         shutil.rmtree(outdir, ignore_errors=True)
+        shutil.rmtree(_data_dir, ignore_errors=True)
     print(f"\n结果: {PASSED} 通过, {FAILED} 失败")
     return 0 if FAILED == 0 else 1
 

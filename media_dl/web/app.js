@@ -252,6 +252,42 @@
   const STATUS_TEXT = { pending: "排队中", downloading: "下载中", done: "已完成",
     error: "失败", cancelled: "已取消", skipped: "已跳过" };
 
+  // 移动端原生下载并发治理：同时最多 N 个，其余排队，避免图集一次性打满线程池
+  const NATIVE_CONCURRENCY = 3;
+  const nativeQueue = [];           // [{ key, url, title, taskId }]
+  let nativeActive = 0;
+  const nativeCancelled = new Set(); // 排队阶段被取消的 taskId
+
+  /** 入队并尽量启动下一个原生下载。 */
+  function enqueueNative(url, title, taskId) {
+    nativeQueue.push({ url: url, title: title, taskId: taskId });
+    upsertTask(taskId, { title: title || "媒体文件", status: "pending" });
+    pumpNativeQueue();
+  }
+
+  function pumpNativeQueue() {
+    while (nativeActive < NATIVE_CONCURRENCY && nativeQueue.length) {
+      const job = nativeQueue.shift();
+      if (nativeCancelled.has(job.taskId)) { nativeCancelled.delete(job.taskId); continue; }
+      nativeActive++;
+      let started = false;
+      try { started = BRIDGE.download(job.url, job.title, job.taskId) !== false; }
+      catch (e) { started = false; }
+      if (!started) {
+        nativeActive--;
+        upsertTask(job.taskId, { status: "error", message: "下载启动失败" });
+        continue;
+      }
+      upsertTask(job.taskId, { status: "downloading" });
+    }
+  }
+
+  /** 某个原生下载结束（终态）后释放并发位并启动排队的下一个。 */
+  function releaseNativeSlot(taskId) {
+    if (nativeActive > 0) nativeActive--;
+    pumpNativeQueue();
+  }
+
   function fmtBytes(n) {
     n = Number(n) || 0;
     if (n < 1024) return n + " B";
@@ -340,6 +376,12 @@
       // PC：取消整个批任务
       api("/api/jobs/" + encodeURIComponent(t._pcJob) + "/cancel", { method: "POST", body: "{}" })
         .catch(() => {});
+    } else if (t.status === "pending") {
+      // 移动端：还在排队，未真正开始下载 —— 标记后由队列跳过，直接落终态
+      nativeCancelled.add(key);
+      upsertTask(key, { status: "cancelled" });
+      toast("已取消排队项");
+      return;
     } else if (NATIVE && BRIDGE && typeof BRIDGE.cancelDownload === "function") {
       try { BRIDGE.cancelDownload(key); } catch (e) { /* 忽略 */ }
     }
@@ -427,7 +469,7 @@
         PC_JOBS.delete(jid);
         if (job.status === "done") {
           toast("下载任务已结束");
-          if (!$("library-card").classList.contains("hidden")) refreshLibrary(false);
+          if (libraryOpen()) refreshLibrary(false);
         }
         return;
       }
@@ -452,14 +494,8 @@
     const url = downloadHref(item) + qualityOf(item);
     if (NATIVE) {
       const taskId = "t" + Date.now() + "_" + item.index;
-      try {
-        const started = BRIDGE.download(url, item.title || "media", taskId);
-        if (started === false) { toast("下载启动失败，请重试"); return; }
-        upsertTask(taskId, { title: item.title || "媒体文件", status: "downloading" });
-        setStatus("正在保存到手机本地：" + item.title);
-      } catch (e) {
-        toast("调用本地下载失败：" + e.message);
-      }
+      enqueueNative(url, item.title || "media", taskId);
+      setStatus("正在保存到手机本地：" + item.title);
       return;
     }
     const a = document.createElement("a");
@@ -477,13 +513,7 @@
     for (let j = 0; j < item.count; j++) {
       const url = base + "&zip=0&j=" + j;
       const taskId = "g" + Date.now() + "_" + item.index + "_" + j;
-      try {
-        const started = BRIDGE.download(url, item.title + "_" + (j + 1), taskId);
-        if (started === false) { toast("第 " + (j + 1) + " 张下载启动失败"); }
-        else upsertTask(taskId, { title: item.title + " 第 " + (j + 1) + " 张", status: "downloading" });
-      } catch (e) {
-        toast("调用本地下载失败：" + e.message);
-      }
+      enqueueNative(url, item.title + "_" + (j + 1), taskId);
     }
     toast("已开始把 " + item.count + " 张图片逐张保存到手机本地");
     setStatus("正在把 " + item.count + " 张图片逐张保存到手机本地（DCIM/随手存）");
@@ -510,19 +540,22 @@
       const t = TASKS.get(key) || {};
       upsertTask(key, { title: t.title || filename, status: "done",
         downloaded: t.total || t.downloaded, total: t.total || t.downloaded });
+      releaseNativeSlot(key);
       setStatus("已保存到手机相册（DCIM/随手存）：" + filename);
       toast("保存完成：" + filename);
-      if (!$("library-card").classList.contains("hidden")) refreshLibrary(false);
+      if (libraryOpen()) refreshLibrary(false);
       return;
     }
     if (state === "cancelled") {
       upsertTask(key, { status: "cancelled", title: (TASKS.get(key) || {}).title || filename });
+      releaseNativeSlot(key);
       setStatus("已取消保存");
       return;
     }
     if (state === "error") {
       upsertTask(key, { status: "error", title: (TASKS.get(key) || {}).title || filename,
         message: message || "未知错误" });
+      releaseNativeSlot(key);
       setStatus("保存失败：" + (message || "未知错误"));
       toast("保存失败：" + (message || "未知错误"));
     }
@@ -723,9 +756,10 @@
   async function downloadAll() {
     if (!LAST_ITEMS.length) { toast("请先解析链接"); return; }
     if (NATIVE) {
-      // 移动端：逐条原生下载，各自进入任务中心（带 taskId，可单独取消）
-      LAST_ITEMS.forEach((item, i) => setTimeout(() => triggerDownload(item), i * 260));
-      setStatus("已开始把 " + LAST_ITEMS.length + " 项保存到手机");
+      // 移动端：逐条入队，靠并发上限（3）自动调度，超出部分显示「排队中」
+      LAST_ITEMS.forEach((item) => triggerDownload(item));
+      setStatus("已开始把 " + LAST_ITEMS.length + " 项保存到手机（最多同时下载 " +
+        NATIVE_CONCURRENCY + " 项）");
       return;
     }
     // PC 端：交给后端后台任务队列，前端可见进度 / 速度 / 取消
@@ -807,30 +841,40 @@
     if (MOBILE) {
       $("settings").classList.add("collapsed");
       $("settings-arrow").textContent = "▸";
+      $("settings-head").setAttribute("aria-expanded", "false");
     }
     // APK：显示「手机号验证码登录抖音自动获取 Cookie」按钮
     if (IS_APK && $("btn-dy-login")) $("btn-dy-login").style.display = "";
   }
 
   // ------------------------------------------------------------------ //
-  // 首启引导：只在「首次使用」或「缺 ffmpeg」时出现，可一键关闭且记住选择。
-  // 目的：把「全程本机、不上传」说清楚，并如实告知缺 ffmpeg 的影响。
+  // 首启引导：**只在第一次进入时**出现；点过「知道了」之后不再自动弹出。
+  //   以服务端 first_run 为准（写在本机持久目录），因此换版本、重启、清浏览器缓存
+  //   都不会让它再冒出来；重新安装才会回到「第一次」。
+  //   ffmpeg 缺失属于「本机环境提示」：首次在卡片里如实说明，之后仅保留设置区
+  //   的一行小字 + 顶部「使用说明」可随时回看，不再每次开屏都弹卡片。
   // ------------------------------------------------------------------ //
-  const GUIDE_SEEN_KEY = "media_dl_guide_seen";
+  const GUIDE_SEEN_KEY = "media_dl_guide_seen";   // 本地缓存，仅用于开屏瞬间少闪一下
 
-  function guideSeen() {
+  function guideSeenLocal() {
     try { return localStorage.getItem(GUIDE_SEEN_KEY) === "1"; } catch (e) { return false; }
   }
-  function markGuideSeen() {
+  function markGuideSeenLocal() {
     try { localStorage.setItem(GUIDE_SEEN_KEY, "1"); } catch (e) { /* ignore */ }
+  }
+
+  /** 是否处于「从未引导过」状态：服务端状态为准，本地缓存仅作开屏兜底。 */
+  function isFirstRun() {
+    if (CFG && typeof CFG.first_run === "boolean") return CFG.first_run;
+    return !guideSeenLocal();
   }
 
   function renderGuide() {
     const card = $("guide-card");
     if (!card) return;
     const needFfmpeg = CFG && CFG.ffmpeg === false;
-    // 已引导过，且系统不缺 ffmpeg → 不再打扰
-    if (guideSeen() && !needFfmpeg) { card.classList.add("hidden"); return; }
+    // 已经引导过 → 静默；缺 ffmpeg 也不再弹卡，改用设置区低调提示（renderFfmpegHint）
+    if (!isFirstRun()) { card.classList.add("hidden"); return; }
 
     const rows = [];
     rows.push('<p>把链接粘进输入框（或直接点「粘贴」），勾选需要的选项，点「下载」即可。' +
@@ -858,9 +902,38 @@
     card.classList.remove("hidden");
   }
 
+  /** 手动「使用说明」：复用首启卡片的渲染路径，随时可看，且不影响首启状态。 */
+  function openGuideManually() {
+    const card = $("guide-card");
+    if (!card) return;
+    const wasFirstRun = CFG ? CFG.first_run : undefined;
+    if (CFG) CFG.first_run = true;                   // 借用同一渲染路径，后续还原
+    renderGuide();
+    if (CFG) CFG.first_run = wasFirstRun;
+    card.classList.remove("hidden");                 // 兜底：确保手动打开一定可见
+    card.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   function closeGuide() {
-    markGuideSeen();
+    markGuideSeenLocal();
+    if (CFG) CFG.first_run = false;
     $("guide-card").classList.add("hidden");
+    // 记到服务端持久目录：换版本 / 重启 / 清缓存都不会再自动弹出
+    api("/api/first-run-done", { method: "POST", body: "{}" }).catch(() => { /* 忽略 */ });
+  }
+
+  /** 缺 ffmpeg 时的低调提示：只在设置区留一行小字，不再每次开屏弹卡。 */
+  function renderFfmpegHint() {
+    const el = $("ffmpeg-hint");
+    if (!el) return;
+    if (CFG && CFG.ffmpeg === false) {
+      el.textContent = "⚠️ 未检测到 ffmpeg：高画质分轨可能不合轨、转码类功能不可用。"
+        + (NATIVE ? "" : " 安装 ffmpeg 并加入 PATH 后重启即可。详情见「使用说明」。");
+      el.classList.remove("hidden");
+    } else {
+      el.textContent = "";
+      el.classList.add("hidden");
+    }
   }
 
   // ------------------------------------------------------------------ //
@@ -886,17 +959,28 @@
     if (!card) return;
     if (!LIBRARY.length) { card.classList.add("hidden"); return; }
     card.classList.remove("hidden");
+    // 列表有内容后，恢复上次的展开状态（默认收起）
+    if (!card._stateInited) {
+      card._stateInited = true;
+      let open = false;
+      try { open = localStorage.getItem(LIB_OPEN_KEY) === "1"; } catch (e) { open = false; }
+      const body = $("library-body");
+      body.classList.toggle("collapsed", !open);
+      $("library-arrow").textContent = open ? "▾" : "▸";
+      const head = $("library-head");
+      if (head) head.setAttribute("aria-expanded", open ? "true" : "false");
+    }
     $("library-summary").textContent = LIBRARY.length + " 个文件";
     $("library-list").innerHTML = LIBRARY.map((f, i) => {
       const dest = NATIVE ? "已存到相册（DCIM/随手存）" : (f.group || "下载目录");
       // 移动端文件已在系统相册里，条目仅作回看；PC 端可从下载目录再次保存 / 定位
       const actions = NATIVE ? "" :
         '<div class="lib-actions">' +
-          '<button class="btn btn-sm lib-reveal" data-i="' + i + '">打开文件夹</button>' +
-          '<button class="btn btn-sm btn-primary lib-again" data-i="' + i + '">再次保存</button>' +
+          '<button class="btn btn-sm lib-reveal" data-i="' + i + '" aria-label="在文件夹中打开">打开文件夹</button>' +
+          '<button class="btn btn-sm btn-primary lib-again" data-i="' + i + '" aria-label="再次保存该文件">再次保存</button>' +
         "</div>";
-      return '<div class="lib-item">' +
-        '<div class="lib-ico ' + escapeHtml(f.kind || "other") + '">' + libIcon(f.kind) + "</div>" +
+      return '<div class="lib-item" role="listitem">' +
+        '<div class="lib-ico ' + escapeHtml(f.kind || "other") + '" aria-hidden="true">' + libIcon(f.kind) + "</div>" +
         '<div class="lib-info"><div class="lib-name">' + escapeHtml(f.name) + "</div>" +
           '<div class="lib-meta"><span>' + escapeHtml(dest) + "</span><span>" +
           fmtBytes(f.size) + "</span><span>" + fmtTime(f.time) + "</span></div></div>" +
@@ -919,10 +1003,7 @@
         const url = apiUrl("/api/file?path=" + encodeURIComponent(f.path));
         if (NATIVE) {
           const taskId = "l" + Date.now() + "_" + parseInt(b.dataset.i, 10);
-          try {
-            if (BRIDGE.download(url, f.name, taskId) === false) { toast("保存失败，请重试"); return; }
-            upsertTask(taskId, { title: f.name, status: "downloading" });
-          } catch (e) { toast("调用本地下载失败：" + e.message); }
+          enqueueNative(url, f.name, taskId);
         } else {
           const a = document.createElement("a");
           a.href = apiUrl("/api/download?path=" + encodeURIComponent(f.path));
@@ -958,17 +1039,43 @@
     }
   }
 
-  function toggleLibrary() {
-    const card = $("library-card");
-    if (!card.classList.contains("hidden")) {
-      card.classList.add("hidden");
+  const LIB_OPEN_KEY = "media_dl_library_open";
+
+  function libraryOpen() {
+    const body = $("library-body");
+    return !!(body && !body.classList.contains("collapsed"));
+  }
+
+  /** 展开 / 收起媒体库主体（默认收起，减少首屏占用）。 */
+  function setLibraryOpen(open, opts) {
+    const body = $("library-body");
+    if (!body) return;
+    body.classList.toggle("collapsed", !open);
+    $("library-arrow").textContent = open ? "▾" : "▸";
+    const head = $("library-head");
+    if (head) head.setAttribute("aria-expanded", open ? "true" : "false");
+    try { localStorage.setItem(LIB_OPEN_KEY, open ? "1" : "0"); } catch (e) { /* 忽略 */ }
+    if (open && !(opts && opts.silent)) {
+      refreshLibrary(false).then(() => {
+        if (LIBRARY.length) {
+          try { $("library-card").scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { /* 忽略 */ }
+        }
+      });
       return;
     }
-    refreshLibrary(true).then(() => {
-      if (LIBRARY.length) {
-        try { card.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { /* ignore */ }
-      }
-    });
+    if (open) refreshLibrary(false);
+  }
+
+  function toggleLibraryOpen() {
+    setLibraryOpen(!libraryOpen());
+  }
+
+  // 工具栏「已下载」：打开并展开媒体库（若已展开则收起）
+  function toggleLibrary() {
+    const card = $("library-card");
+    if (libraryOpen()) { setLibraryOpen(false); return; }
+    card.classList.remove("hidden");
+    setLibraryOpen(true);
   }
 
   async function boot() {
@@ -980,6 +1087,7 @@
       updateCount();
       runDetect();
       renderGuide();
+      renderFfmpegHint();
       setStatus(NATIVE ? "已就绪 · 粘贴链接后点下方按钮，文件直接保存到手机本地"
                        : "已就绪 · 粘贴链接后点下方按钮");
     } catch (e) {
@@ -1056,8 +1164,15 @@
   $("btn-clear-jobs").addEventListener("click", clearFinishedTasks);
   $("btn-paste").addEventListener("click", pasteFromClipboard);
   if ($("btn-library")) $("btn-library").addEventListener("click", toggleLibrary);
+  if ($("library-head")) {
+    $("library-head").addEventListener("click", toggleLibraryOpen);
+    $("library-head").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleLibraryOpen(); }
+    });
+  }
   if ($("btn-refresh-library")) $("btn-refresh-library").addEventListener("click", () => refreshLibrary(true));
   if ($("btn-guide-close")) $("btn-guide-close").addEventListener("click", closeGuide);
+  if ($("btn-help")) $("btn-help").addEventListener("click", openGuideManually);
   $("btn-clear").addEventListener("click", () => {
     $("input").value = ""; updateCount(); renderDetect([]);
     $("result-card").classList.add("hidden"); LAST_ITEMS = [];
@@ -1085,7 +1200,12 @@
   $("settings-head").addEventListener("click", () => {
     const el = $("settings");
     el.classList.toggle("collapsed");
-    $("settings-arrow").textContent = el.classList.contains("collapsed") ? "▸" : "▾";
+    const closed = el.classList.contains("collapsed");
+    $("settings-arrow").textContent = closed ? "▸" : "▾";
+    $("settings-head").setAttribute("aria-expanded", closed ? "false" : "true");
+  });
+  $("settings-head").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("settings-head").click(); }
   });
   $("opt-remove-watermark").addEventListener("change", saveSettings);
   ["opt-quality", "opt-max-images", "opt-page-images", "opt-expand",

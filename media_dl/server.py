@@ -31,7 +31,7 @@ from .links import detect_media
 from .models import Progress
 from .options import DownloadOptions, has_ffmpeg
 from .qr import qr_svg
-from . import secure_store
+from . import app_state, secure_store
 from .version import __version_short__
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -45,12 +45,25 @@ _DEFAULT_OUTDIR = Path.cwd() / "downloads"
 # APP 内登录抖音自动捕获的登录态 Cookie：仅在本机保存与使用，只发往抖音，绝不上传。
 # 落盘经 secure_store 加密（Windows=DPAPI 绑定当前用户；其它平台=沙箱隔离），
 # 备份 / 导出 / 复制到别的机器都无法还原明文。
-_DATA_DIR = Path(__file__).resolve().parent / "data"
+#
+# 目录由 app_state 统一解析：EXE 的 onefile 临时目录与 Android 的版本重建目录都会
+# 清空包目录，状态放那里必然「每次启动都像第一次」。
+_DATA_DIR = app_state.state_dir()
 _COOKIE_STORE = _DATA_DIR / "cookie_store.txt"
 
 
 def _load_cookie_store() -> str:
-    return secure_store.read_secret(_COOKIE_STORE)
+    text = secure_store.read_secret(_COOKIE_STORE)
+    if text:
+        return text
+    # 兼容旧版：v6.2 及以前写在包目录 data/ 下，升级后迁一次，不让用户重新登录
+    legacy = app_state.legacy_data_dir() / "cookie_store.txt"
+    if legacy != _COOKIE_STORE and legacy.exists():
+        old = secure_store.read_secret(legacy)
+        if old:
+            _save_cookie_store(old)
+            return old
+    return ""
 
 
 def _save_cookie_store(cookie: str) -> None:
@@ -161,7 +174,14 @@ def manifest():
 
 @app.get("/sw.js")
 def service_worker():
-    resp = make_response(send_from_directory(WEB_DIR, "sw.js"))
+    # 注入真实版本号到缓存名，改版后自动换缓存，避免用户拿到旧静态资源
+    try:
+        src = (WEB_DIR / "sw.js").read_text(encoding="utf-8")
+    except Exception:                       # noqa: BLE001
+        return send_from_directory(WEB_DIR, "sw.js")
+    src = src.replace("__VERSION__", __version_short__)
+    resp = make_response(src)
+    resp.headers["Content-Type"] = "application/javascript; charset=utf-8"
     resp.headers["Service-Worker-Allowed"] = "/"
     resp.headers["Cache-Control"] = "no-cache"
     return resp
@@ -195,7 +215,18 @@ def api_config():
         "secure_store": secure_store.backend(),
         # 前端能力开关：Android 上有 Java 原生下载，PC 上交给浏览器
         "native_download": current == "android",
+        # 首启引导：只有从未完成过才为 true，之后进入不再显示（跨重启 / 跨升级都记得）
+        "first_run": app_state.is_first_run(),
     })
+
+
+@app.post("/api/first-run-done")
+def api_first_run_done():
+    """标记首启引导已完成。写在本机持久目录，重装之前都不会再自动弹出。"""
+    if not _is_local():
+        return jsonify({"error": "只允许本机调用"}), 403
+    app_state.mark_first_run_done()
+    return jsonify({"ok": True, "first_run": False})
 
 
 @app.post("/api/auth")

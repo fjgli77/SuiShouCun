@@ -74,6 +74,9 @@ SITE_PACKAGES = [
 ]
 SKIP_SUFFIXES = {".pyc", ".pyo", ".pyd", ".so", ".dll", ".dylib", ".exe", ".a", ".lib"}
 SKIP_DIRS = {"__pycache__", ".git", "tests", "test"}
+# 运行期数据目录：绝不能进包。里面是用户登录态 Cookie（cookie_store.txt）与首启状态，
+# 一旦被打进发行包，等于把构建机主人的账号随 APK 发出去。
+SKIP_TREE = {"data"}
 
 
 # --------------------------------------------------------------------------- #
@@ -212,10 +215,16 @@ def site_packages_dir() -> Path:
     return Path(sysconfig.get_paths()["purelib"])
 
 
-def copy_tree(src: Path, dst: Path) -> None:
-    """复制纯 Python 包：排除原生扩展、缓存、测试与打包元数据。"""
+def copy_tree(src: Path, dst: Path, skip_tree: set[str] | None = None) -> None:
+    """复制纯 Python 包：排除原生扩展、缓存、测试与打包元数据。
+
+    ``skip_tree`` 用于额外的顶层目录名黑名单，用来剔除运行期数据目录。
+    """
+    skip_tree = skip_tree or set()
     for root, dirs, files in os.walk(src):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.endswith(".dist-info")]
+        dirs[:] = [d for d in dirs
+                   if d not in SKIP_DIRS and d not in skip_tree
+                   and not d.endswith(".dist-info")]
         rel = Path(root).relative_to(src)
         target = dst / rel
         target.mkdir(parents=True, exist_ok=True)
@@ -263,11 +272,17 @@ def prepare_assets(runtime: Path) -> Path:
     shutil.copy2(VENDOR / STDLIB_ZIP, py / "stdlib.zip")
 
     # 与 PC EXE 完全相同的 media_dl 源码与前端
+    # （skip_tree 剔除 data/：里面是构建机的登录态 Cookie，绝不能随包发出去）
     src_pkg = ROOT / "media_dl"
     dst_pkg = py / "app" / "media_dl"
-    copy_tree(src_pkg, dst_pkg)
+    copy_tree(src_pkg, dst_pkg, skip_tree=SKIP_TREE)
     if not (dst_pkg / "__init__.py").exists() or not (dst_pkg / "web" / "index.html").exists():
         raise SystemExit("media_dl 源码 / 前端复制不完整")
+    for leaked in SKIP_TREE:
+        if (dst_pkg / leaked).exists():
+            raise SystemExit(f"运行期数据目录 {leaked}/ 不应进包：请检查 copy_tree 的 skip_tree")
+    if not (dst_pkg / "app_state.py").exists():
+        raise SystemExit("app_state.py 未打入 APK（首启状态将无法持久化）")
 
     # 纯 Python 依赖（从开发环境的 site-packages 取，剔除 Windows 原生扩展）
     # 注意：必须连同同级 *.dist-info 一起复制，否则 importlib.metadata 取不到版本
