@@ -22,13 +22,13 @@ from .models import DownloadResult, MediaEntry, ParseResult, Progress
 from .nocookie import parse_nocookie
 from .options import DownloadOptions, has_ffmpeg
 from .qr import qr_svg
-
-__version__ = "6.1.0"
+from .version import __version__, __version_code__, __version_short__
 
 __all__ = [
     "download_text", "download_parsed", "download_entry", "iter_files",
     "parse_text", "parse_link", "parse_nocookie", "extract_images_from_page",
     "prepare", "extract_urls", "detect_platform", "detect_media", "Link",
     "DownloadOptions", "DownloadResult", "MediaEntry", "ParseResult", "Progress",
-    "has_ffmpeg", "qr_svg", "__version__",
+    "has_ffmpeg", "qr_svg",
+    "__version__", "__version_short__", "__version_code__",
 ]

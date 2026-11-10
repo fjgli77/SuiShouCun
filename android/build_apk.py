@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -30,6 +31,29 @@ BUILD = HERE / "build"
 VENDOR = HERE / "vendor"
 CN_NAME = "随手存-手机版"
 ASCII_NAME = "SuiShouCun-Mobile"
+
+
+def read_version() -> tuple[str, int]:
+    """从 media_dl/version.py 读版本号（唯一真源），避免清单里再硬编码一份。"""
+    src = (ROOT / "media_dl" / "version.py").read_text(encoding="utf-8")
+    name = re.search(r'^__version__\s*=\s*"([^"]+)"', src, re.MULTILINE)
+    code = re.search(r"^__version_code__\s*=\s*(\d+)", src, re.MULTILINE)
+    if not name or not code:
+        raise SystemExit("media_dl/version.py 缺少 __version__ / __version_code__")
+    return name.group(1), int(code.group(1))
+
+
+def render_manifest() -> Path:
+    """把版本号注入 AndroidManifest.xml，输出到 build/ 供 aapt2 使用。"""
+    name, code = read_version()
+    src = (HERE / "AndroidManifest.xml").read_text(encoding="utf-8")
+    src = re.sub(r'android:versionCode="[^"]*"', f'android:versionCode="{code}"', src, count=1)
+    src = re.sub(r'android:versionName="[^"]*"', f'android:versionName="{name}"', src, count=1)
+    BUILD.mkdir(parents=True, exist_ok=True)
+    out = BUILD / "AndroidManifest.xml"
+    out.write_text(src, encoding="utf-8")
+    print(f"    版本号注入：versionName={name} versionCode={code}", flush=True)
+    return out
 
 BT_VERSION = "36.0.0"
 PLATFORM = "android-34"
@@ -345,8 +369,9 @@ def main() -> int:
 
     # 2. 基础包（含 assets）
     base_apk = BUILD / "base.apk"
+    manifest = render_manifest()
     run([str(aapt2), "link", "-o", str(base_apk), "-I", str(android_jar),
-         "--manifest", str(HERE / "AndroidManifest.xml"),
+         "--manifest", str(manifest),
          "-R", str(compiled), "--auto-add-overlay",
          "-A", str(assets),
          "--java", str(BUILD / "gen"),

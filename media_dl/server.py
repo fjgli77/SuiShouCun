@@ -31,6 +31,7 @@ from .links import detect_media
 from .models import Progress
 from .options import DownloadOptions, has_ffmpeg
 from .qr import qr_svg
+from .version import __version_short__
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 app = Flask(__name__, static_folder=None)
@@ -71,6 +72,31 @@ _STATE: dict[str, Any] = {
 
 def _is_local() -> bool:
     return request.remote_addr in ("127.0.0.1", "::1")
+
+
+# 把内部异常翻译成用户可读文案：主文案不含英文异常类名，原始信息留作技术详情。
+_ERROR_HINTS: tuple[tuple[str, str], ...] = (
+    ("403", "平台拒绝匿名访问（风控），请稍后重试或改用分享口令"),
+    ("401", "该内容需要登录后才能访问"),
+    ("404", "内容不存在或链接已失效"),
+    ("429", "请求过于频繁被限流，请稍后再试"),
+    ("timed out", "网络请求超时，请检查网络后重试"),
+    ("timeout", "网络请求超时，请检查网络后重试"),
+    ("connection", "网络连接失败，请检查网络后重试"),
+    ("ssl", "加密连接异常，请检查网络环境后重试"),
+    ("已过期", "下载链接已过期，请重新解析后再下载"),
+    ("不可用", "媒体地址暂时不可用，请稍后重试"),
+    ("没有产生文件", "下载未产生文件，请重试"),
+)
+
+
+def _friendly_error(exc: Exception, fallback: str = "操作失败，请稍后重试") -> str:
+    """把异常翻译成面向用户的短文案（不含英文类名 / 堆栈）。"""
+    text = f"{type(exc).__name__} {exc}".lower()
+    for needle, hint in _ERROR_HINTS:
+        if needle.lower() in text:
+            return hint
+    return fallback
 
 
 def runtime() -> str:
@@ -165,7 +191,7 @@ def api_config():
         "watermark_free": True,
         "preview": True,
         "nocookie": True,
-        "version": "6.1",
+        "version": __version_short__,
         "runtime": current,
         "client": current,
         # 前端能力开关：Android 上有 Java 原生下载，PC 上交给浏览器
@@ -251,7 +277,7 @@ def api_parse():
             "remove_watermark": opts.remove_watermark,
         })
     except Exception as exc:                          # noqa: BLE001
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _friendly_error(exc, "解析失败，请确认链接可公开访问或稍后重试")}), 500
 
 
 @app.get("/api/fetch")
@@ -283,7 +309,7 @@ def api_fetch():
     except LookupError as exc:
         return jsonify({"error": str(exc)}), 404
     except Exception as exc:                          # noqa: BLE001
-        return jsonify({"error": f"下载失败：{str(exc)[:240]}"}), 502
+        return jsonify({"error": _friendly_error(exc, "下载失败，请稍后重试")}), 502
 
 
 @app.get("/api/thumb")
@@ -479,20 +505,22 @@ def _run_job(jid: str) -> None:
                                 job["files"].append(f)
                 except RuntimeError as exc:
                     if "取消" not in str(exc):
+                        friendly = _friendly_error(exc, "下载失败，请稍后重试")
                         _log(job, f"失败 {entry.title}: {exc}")
                         with _LOCK:
-                            job["errors"].append(f"{entry.title}: {exc}")
+                            job["errors"].append(f"{entry.title}: {friendly}")
                             job["cards"][entry.id] = Progress(
                                 entry_id=entry.id, status="error", title=entry.title,
-                                message=str(exc)).to_dict()
+                                message=friendly).to_dict()
                     break
                 except Exception as exc:                  # noqa: BLE001
+                    friendly = _friendly_error(exc, "下载失败，请稍后重试")
                     _log(job, f"失败 {entry.title}: {exc}")
                     with _LOCK:
-                        job["errors"].append(f"{entry.title}: {str(exc)[:300]}")
+                        job["errors"].append(f"{entry.title}: {friendly}")
                         job["cards"][entry.id] = Progress(
                             entry_id=entry.id, status="error", title=entry.title,
-                            message=str(exc)[:300]).to_dict()
+                            message=friendly).to_dict()
             if cancel.is_set():
                 break
 
@@ -503,7 +531,7 @@ def _run_job(jid: str) -> None:
     except Exception as exc:                              # noqa: BLE001
         with _LOCK:
             job["status"] = "error"
-            job["errors"].append(str(exc))
+            job["errors"].append(_friendly_error(exc, "任务执行异常，请重试"))
             job["finished"] = time.time()
         _log(job, f"任务异常: {exc}")
 
@@ -579,7 +607,7 @@ def run_server(
 
     local_url = f"http://127.0.0.1:{port}"
     print("\n" + "=" * 62)
-    print("  随手存 v6.1 · 一个应用，PC / Android 各自本机运行")
+    print(f"  随手存 v{__version_short__} · 一个应用，PC / Android 各自本机运行")
     print(f"  运行位置  : {'Android APK' if current == 'android' else 'Windows EXE'}")
     print(f"  界面地址  : {local_url}/")
     print("  下载方式  : " + ("Java 原生写入手机存储" if current == "android" else "交给浏览器下载管理器"))

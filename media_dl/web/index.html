@@ -105,6 +105,18 @@
       <div id="result-list" class="result-list"></div>
       <p class="tip" id="result-tip"></p>
     </section>
+
+    <!-- 下载任务中心：过程可见（进度 / 速度 / 剩余时间 / 取消） -->
+    <section class="card hidden" id="jobs-card">
+      <div class="card-head">
+        <h2>下载任务</h2>
+        <div class="row">
+          <span class="badge" id="jobs-summary"></span>
+          <button class="btn btn-ghost btn-sm" id="btn-clear-jobs">清除已完成</button>
+        </div>
+      </div>
+      <div id="jobs-list" class="jobs-list"></div>
+    </section>
   </main>
 
   <div class="status" id="status">已就绪 · 粘贴链接后点下方按钮</div>

@@ -46,7 +46,8 @@ def parse_text(text: str, options: DownloadOptions | None = None) -> list[ParseR
             results.append(parse_link(link, opts))
         except Exception as exc:                    # noqa: BLE001 - 单条失败不拖垮整批解析
             bad = ParseResult(link=link)
-            bad.error = _brief(exc)
+            bad.error = _friendly(exc)              # 用户可见文案：不含英文异常类名
+            bad.warnings.append(f"技术细节：{_brief(exc)}")   # 原始异常留在 warning，供折叠区排查
             results.append(bad)
     return results
 
@@ -157,21 +158,22 @@ def _parse_link_impl(link: Link, options: DownloadOptions | None = None) -> Pars
         result.warnings.append("该链接是视频页面，已跳过网页图片兜底，避免把封面误当成图片")
 
     if not result.error:
+        # 挑选用户可读的 warning 作理由：跳过「技术细节：」这类给排查用的原始异常行
+        readable = [w for w in result.warnings if not w.startswith("技术细节：")]
         if link.platform in ("douyin", "kuaishou"):
-            detail = f" 参考信息：{result.warnings[0]}" if result.warnings else ""
             result.error = (
                 "该作品未能通过免 Cookie 通道获取（平台风控或移动端通道暂未收录）。"
-                "可稍后重试，或改用 App 里复制的完整分享短链；全程无需登录 Cookie 与代理。" + detail
+                "可稍后重试，或改用 App 里复制的完整分享短链；全程无需登录 Cookie 与代理。"
             )
         elif definite_video:
-            reason = result.warnings[-1] if result.warnings else "视频流未返回"
+            reason = readable[-1] if readable else "视频流未返回"
             result.error = (
                 f"该视频页面未能解析出可下载的视频：{reason}。"
                 "常见原因是内容需要登录 / 大会员、地区限制或平台风控；"
                 "本项目全程免 Cookie、免代理，可换用公开视频链接或稍后重试。"
             )
         else:
-            reason = result.warnings[0] if result.warnings else "无法识别该链接"
+            reason = readable[0] if readable else "无法识别该链接"
             result.error = reason + "；请确认链接可公开访问、未过期，或稍后重试（全流程免 Cookie、免代理）"
     return result
 
@@ -812,24 +814,38 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 _FRIENDLY_ERRORS = (
-    ("fresh cookies", "平台网页接口要求浏览器登录态，已触发风控拦截"),
+    ("fresh cookies", "平台要求登录后访问，已触发风控拦截"),
     ("argussecurityplugin", "平台风控网关拒绝了匿名请求"),
     ("signature not found", "平台签名校验未通过"),
     ("http error 403", "平台拒绝匿名访问（403 风控）"),
+    ("http error 401", "需要登录才能访问该内容"),
     ("http error 404", "作品不存在或已删除"),
+    ("http error 429", "请求过于频繁，被平台限流，请稍后再试"),
+    ("http error 5", "平台服务器暂时异常，请稍后重试"),
     ("unsupported url", "该链接格式暂不被解析器支持"),
     ("no video formats", "未找到可下载的媒体格式"),
+    ("video unavailable", "视频不可用（可能已删除或仅限特定地区）"),
+    ("private video", "该作品为私密内容，无法访问"),
+    ("login required", "该内容需要登录后才能访问"),
+    ("not found", "内容不存在或链接已失效"),
+    ("timed out", "网络请求超时，请检查网络后重试"),
+    ("timeout", "网络请求超时，请检查网络后重试"),
+    ("connection", "网络连接失败，请检查网络后重试"),
+    ("ssl", "加密连接异常，请检查网络环境后重试"),
+    ("urlopen error", "网络连接失败，请检查网络后重试"),
+    ("json", "平台返回数据异常（可能是风控拦截），请稍后重试"),
+    ("keyerror", "平台返回数据结构有变化，请稍后重试"),
+    ("typeerror", "平台返回数据结构有变化，请稍后重试"),
 )
 
 
 def _friendly(exc: Exception) -> str:
-    """把 yt-dlp 的英文风控报错转成用户能看懂的中文提示。"""
-    msg = _brief(exc)
-    low = msg.lower()
+    """把英文异常 / 风控报错转成用户能看懂的中文提示（不含英文异常类名）。"""
+    low = f"{type(exc).__name__} {_brief(exc)}".lower()
     for needle, hint in _FRIENDLY_ERRORS:
         if needle in low:
-            return f"{hint}（原始信息：{msg}）"
-    return msg
+            return hint
+    return "解析失败，请确认链接可公开访问、未过期，或稍后重试"
 
 
 def _brief(exc: Exception, limit: int = 140) -> str:

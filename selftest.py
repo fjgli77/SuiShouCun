@@ -374,7 +374,15 @@ def test_mobile_feed(base: str, outdir: Path) -> None:
               repr(retry_files))
 
     friendly = _friendly(Exception("ERROR: [Douyin] 123: Fresh cookies (not necessarily logged in) are needed"))
-    check("yt-dlp 风控报错转中文提示", "风控" in friendly and "登录态" in friendly, friendly)
+    check("yt-dlp 风控报错转中文提示", "风控" in friendly and "登录" in friendly, friendly)
+    # 人话化：用户可见文案不应包含英文异常类名 / 原始英文信息
+    check("错误文案不含英文异常原文", "cookies" not in friendly.lower() and "ERROR" not in friendly,
+          friendly)
+    check("未知异常兜底为中文提示",
+          "解析失败" in _friendly(Exception("some unexpected native error 0xdeadbeef")),
+          _friendly(Exception("some unexpected native error 0xdeadbeef")))
+    check("异常类型名参与识别（KeyError 也算平台数据结构变化）",
+          "平台返回数据" in _friendly(KeyError("nested")), _friendly(KeyError("nested")))
 
     session = nocookie._api_session(opts)
     check("Feed 会话不带 Cookie / 不强制代理",
@@ -794,6 +802,8 @@ def test_v6(client, base: str, outdir: Path) -> None:
     jni = Path("android/jni/pystart.c").read_text(encoding="utf-8")
     manifest = Path("android/AndroidManifest.xml").read_text(encoding="utf-8")
     entry = Path("media_dl/android_entry.py").read_text(encoding="utf-8")
+    server_src = Path("media_dl/server.py").read_text(encoding="utf-8")
+    apk_src = Path("android/build_apk.py").read_text(encoding="utf-8")
     check("APK 内嵌 CPython 并启动同一个 Flask 服务",
           "PyService.nativeStart" in java and "Py_InitializeFromConfig" in jni
           and "run_server(" in entry and 'runtime="android"' in entry)
@@ -865,6 +875,7 @@ def test_v6(client, base: str, outdir: Path) -> None:
           str(thumb.status_code))
     page = client.get("/").data.decode("utf-8")
     js = client.get("/static/app.js").data.decode("utf-8")
+    css = client.get("/static/style.css").data.decode("utf-8")
     check("统一页面含预览弹层与失败原因渲染",
           "preview-modal" in page and "renderErrors" in js and "result-errors" in page)
     check("统一页面显示解析选项与去水印开关",
@@ -925,6 +936,69 @@ def test_v6(client, base: str, outdir: Path) -> None:
     check("解析结果栏能拿到明确失败原因",
           "视频" in str(result.error) and bool(result.to_dict().get("warnings")),
           str(result.error)[:160])
+
+    # ---- 5. 版本号单一真源（IT A-4）：不再三处各写一份 ----
+    from media_dl import __version__, __version_code__, __version_short__
+    check("版本号单一真源集中定义",
+          __version__ == "6.1.0" and __version_short__ == "6.1" and isinstance(__version_code__, int),
+          f"{__version__} / {__version_short__} / {__version_code__}")
+    check("服务端版本号取自真源（非硬编码字面量）",
+          'from .version import __version_short__' in server_src
+          and '"version": "6.1"' not in server_src,
+          "")
+    check("构建脚本从真源注入清单版本号",
+          "read_version" in apk_src and "render_manifest" in apk_src
+          and "media_dl" in apk_src and "version.py" in apk_src,
+          "")
+
+    # ---- 6. 安卓系统分享接入（IT A-1）：入口 5 步 → 1 步 ----
+    check("清单注册系统分享（SEND text/plain）",
+          "android.intent.action.SEND" in manifest and 'android:mimeType="text/plain"' in manifest,
+          "")
+    check("清单注册 VIEW 打开链接（http/https）",
+          "android.intent.action.VIEW" in manifest
+          and 'android:scheme="http"' in manifest and 'android:scheme="https"' in manifest,
+          "")
+    check("接收分享时读取 Intent 文本",
+          "captureShareIntent" in java and "Intent.EXTRA_TEXT" in java
+          and "ACTION_SEND" in java and "ACTION_VIEW" in java,
+          "")
+    check("热启动接收新分享（onNewIntent）",
+          "protected void onNewIntent" in java and "setIntent(intent)" in java,
+          "")
+    check("分享链接双通道交付（push 注入 + pull 拉取）",
+          "onSharedLink" in java and "takeSharedText" in js and "onSharedLink" in js,
+          "")
+    check("前端统一消费分享文本（含去重）",
+          "function ingestShared" in js and "indexOf(text) !== -1" in js,
+          "")
+
+    # ---- 7. 任务中心接线 + 进度可视化（IT A-2 / A-3）----
+    check("前端接入任务队列 API",
+          "/api/jobs" in js and "startPcJob" in js and "pollPcJob" in js,
+          "")
+    check("任务中心支持取消",
+          "cancelTask" in js and "/cancel" in js,
+          "")
+    check("页面含下载任务卡片区域",
+          "jobs-card" in page and "jobs-list" in page and "btn-clear-jobs" in page,
+          "")
+    check("任务进度条样式（含不确定进度）",
+          ".job-bar" in css and ".job-item" in css and "jobslide" in css,
+          "")
+    check("原生下载上报结构化进度并支持取消",
+          "progJson" in java and "cancelDownload" in java
+          and "downloadCancels" in java and '"cancelled"' in java,
+          "")
+    check("原生回调带 taskId 归属",
+          "window.onNativeDownload(" in java and "taskId" in java
+          and "onNativeDownload = function (state, filename, taskId, message)" in js,
+          "")
+
+    # ---- 8. 错误文案人话化（IT A-5）----
+    check("错误区技术详情收进折叠区",
+          "err-details" in css and "<details" in js and "技术细节：" in js,
+          "")
 
 
 def main() -> int:

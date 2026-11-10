@@ -239,6 +239,207 @@
     });
   }
 
+  // ------------------------------------------------------------------ //
+  // 下载任务中心：把「黑盒下载」变成可见的任务列表（进度 / 速度 / 剩余 / 取消）
+  //   - 移动端：Java 原生下载，进度经 JS Bridge 回调（taskId 归属）
+  //   - PC 端：走后端 /api/jobs 后台任务，前端轮询进度
+  // 两种实现共用一个 TASKS 表与同一套渲染，界面表现一致。
+  // ------------------------------------------------------------------ //
+  const TASKS = new Map();          // key -> { key, title, status, percent, downloaded, total, speed, eta, message, cancel, _pcJob }
+  const PC_JOBS = new Map();        // jobId -> { timer, keys:Set }
+  const TERMINAL = { done: 1, error: 1, cancelled: 1 };
+
+  const STATUS_TEXT = { pending: "排队中", downloading: "下载中", done: "已完成",
+    error: "失败", cancelled: "已取消", skipped: "已跳过" };
+
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(0) + " KB";
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + " MB";
+    return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
+  }
+  function fmtSpeed(bps) {
+    if (!bps || bps <= 0) return "";
+    return fmtBytes(bps) + "/s";
+  }
+  function fmtEta(sec) {
+    if (sec == null || sec < 0) return "";
+    if (sec < 60) return sec + " 秒";
+    return Math.floor(sec / 60) + " 分 " + (sec % 60) + " 秒";
+  }
+
+  function upsertTask(key, patch) {
+    const cur = TASKS.get(key) || { key: key, percent: 0, downloaded: 0, total: 0, speed: 0, eta: null, status: "pending", title: "" };
+    Object.assign(cur, patch || {});
+    // 计算瞬时速度（原生端不回报速度，由前端按字节差估算）
+    const now = Date.now();
+    if (cur.status === "downloading" && cur.downloaded) {
+      if (cur._t && cur._b != null && now > cur._t) {
+        const inst = (cur.downloaded - cur._b) / ((now - cur._t) / 1000);
+        if (inst > 0) cur.speed = inst;
+      }
+      cur._t = now; cur._b = cur.downloaded;
+    }
+    if (cur.total > 0) cur.percent = Math.max(0, Math.min(100, cur.downloaded / cur.total * 100));
+    else if (cur.status === "done") cur.percent = 100;
+    TASKS.set(key, cur);
+    renderJobs();
+    return cur;
+  }
+
+  function taskRowHtml(t) {
+    const st = t.status || "pending";
+    const terminal = !!TERMINAL[st];
+    const pct = (st === "done") ? 100 : (t.total > 0 ? t.percent : 0);
+    const indeterminate = (st === "downloading" || st === "pending") && !(t.total > 0);
+    const meta = [];
+    if (t.total > 0) meta.push(fmtBytes(t.downloaded) + " / " + fmtBytes(t.total));
+    else if (t.downloaded > 0) meta.push(fmtBytes(t.downloaded));
+    if (st === "downloading" && t.speed > 0) meta.push(fmtSpeed(t.speed));
+    if (st === "downloading" && t.eta != null) meta.push("剩 " + fmtEta(t.eta));
+    if (terminal) meta.push(STATUS_TEXT[st] || st);
+    if (st === "error" && t.message) meta.push(t.message);
+    const bar = '<div class="job-bar' + (indeterminate ? " indet" : "") + '"><i style="width:' +
+      (indeterminate ? 38 : pct).toFixed(1) + '%"></i></div>';
+    const cancelBtn = terminal ? "" :
+      '<button class="job-cancel" data-cancel="' + escapeHtml(t.key) + '">取消</button>';
+    // 状态徽标：排队中 / 下载中 / 已完成 / 失败 / 已取消
+    const badge = '<span class="tag' + (st === "done" ? " ok" : (st === "error" ? " err" : "")) + '">' +
+      escapeHtml(STATUS_TEXT[st] || st) + "</span>";
+    return '<div class="job-item ' + st + '">' +
+      '<div class="job-top">' +
+        '<span class="job-title">' + escapeHtml(t.title || "媒体文件") + "</span>" +
+        badge + cancelBtn +
+      "</div>" + bar +
+      '<div class="job-meta">' + escapeHtml(meta.join(" · ")) + "</div>" +
+    "</div>";
+  }
+
+  function renderJobs() {
+    const list = $("jobs-list");
+    if (!list) return;
+    const all = Array.from(TASKS.values());
+    const card = $("jobs-card");
+    if (!all.length) { card.classList.add("hidden"); return; }
+    card.classList.remove("hidden");
+    // 进行中在前，已结束在后；同类按加入顺序
+    all.sort((a, b) => (TERMINAL[a.status] ? 1 : 0) - (TERMINAL[b.status] ? 1 : 0));
+    $("jobs-summary").textContent = all.length + " 项 · " +
+      all.filter((t) => t.status === "done").length + " 已完成";
+    list.innerHTML = all.map(taskRowHtml).join("");
+    Array.prototype.forEach.call(list.querySelectorAll("[data-cancel]"), (b) => {
+      b.addEventListener("click", () => cancelTask(b.dataset.cancel));
+    });
+  }
+
+  function cancelTask(key) {
+    const t = TASKS.get(key);
+    if (!t) return;
+    if (t._pcJob) {
+      // PC：取消整个批任务
+      api("/api/jobs/" + encodeURIComponent(t._pcJob) + "/cancel", { method: "POST", body: "{}" })
+        .catch(() => {});
+    } else if (NATIVE && BRIDGE && typeof BRIDGE.cancelDownload === "function") {
+      try { BRIDGE.cancelDownload(key); } catch (e) { /* 忽略 */ }
+    }
+    upsertTask(key, { status: "cancelled" });
+    toast("已请求取消");
+  }
+
+  /** PC 端：把一批链接交给后端后台任务下载，前端轮询进度。 */
+  async function startPcJob(text) {
+    let data;
+    try {
+      data = await api("/api/jobs", { method: "POST", body: JSON.stringify({ text: text, options: collectOptions() }) });
+    } catch (e) {
+      toast("创建任务失败：" + e.message);
+      return null;
+    }
+    const jid = data.id;
+    PC_JOBS.set(jid, { timer: null, keys: new Set() });
+    upsertTask(jid, { title: "解析中…", status: "downloading", _pcJob: jid, _placeholder: true });
+    pollPcJob(jid);
+    return jid;
+  }
+
+  function pollPcJob(jid) {
+    const rec = PC_JOBS.get(jid);
+    if (!rec) return;
+    rec.timer = setTimeout(async () => {
+      let job;
+      try {
+        job = await api("/api/jobs/" + encodeURIComponent(jid));
+      } catch (e) {
+        upsertTask(jid, { status: "error", message: "任务查询失败" });
+        PC_JOBS.delete(jid);
+        return;
+      }
+      const cards = job.cards || {};
+      const keys = new Set();
+      const entries = Object.keys(cards);
+      if (!entries.length) {
+        upsertTask(jid, { title: "解析中…", status: job.status === "error" ? "error" : "downloading" });
+        keys.add(jid);
+      } else {
+        // 移除仅用于占位的批次行，改为逐条展示
+        if (TASKS.has(jid) && TASKS.get(jid)._placeholder) TASKS.delete(jid);
+        entries.forEach((eid) => {
+          const c = cards[eid] || {};
+          const key = jid + "|" + eid;
+          keys.add(key);
+          const st = c.status === "finished" ? "done" : (c.status || "pending");
+          upsertTask(key, {
+            title: c.title || "媒体文件",
+            status: st,
+            downloaded: c.downloaded || 0,
+            total: c.total || 0,
+            percent: c.percent || 0,
+            eta: c.eta,
+            message: c.message || "",
+            _pcJob: jid,
+          });
+        });
+      }
+      // 清理本任务内已消失的旧键
+      (rec.keys || new Set()).forEach((k) => { if (!keys.has(k)) TASKS.delete(k); });
+      rec.keys = keys;
+
+      if (job.status === "done" || job.status === "error" || job.status === "cancelled") {
+        // 收尾：把尚在进行的行落成终态
+        entries.forEach((eid) => {
+          const key = jid + "|" + eid;
+          const t = TASKS.get(key);
+          if (t && !TERMINAL[t.status]) {
+            upsertTask(key, { status: t.percent >= 100 ? "done" : "error",
+              message: t.message || "任务已结束" });
+          }
+        });
+        // 仅在「始终没解析出任何条目」时才保留一条批次汇总行
+        if (TASKS.has(jid)) {
+          const ok = job.status === "done";
+          upsertTask(jid, {
+            status: job.status === "error" ? "error" : (job.status === "cancelled" ? "cancelled" : "done"),
+            title: ok ? "下载完成" : (job.status === "cancelled" ? "已取消" : "任务失败"),
+            downloaded: 1, total: 1,
+          });
+        }
+        PC_JOBS.delete(jid);
+        if (job.status === "done") toast("下载任务已结束");
+        return;
+      }
+      pollPcJob(jid);
+    }, 900);
+  }
+
+  function clearFinishedTasks() {
+    Array.from(TASKS.keys()).forEach((k) => {
+      const t = TASKS.get(k);
+      if (t && TERMINAL[t.status]) TASKS.delete(k);
+    });
+    renderJobs();
+  }
+
   function triggerDownload(item) {
     // 移动端图集：不打包 zip，逐张图片单独下载到手机本地（DCIM/随手存）
     if (NATIVE && item.kind === "gallery" && item.count > 1) {
@@ -247,10 +448,11 @@
     }
     const url = downloadHref(item) + qualityOf(item);
     if (NATIVE) {
+      const taskId = "t" + Date.now() + "_" + item.index;
       try {
-        const started = BRIDGE.download(url, item.title || "media");
+        const started = BRIDGE.download(url, item.title || "media", taskId);
         if (started === false) { toast("下载启动失败，请重试"); return; }
-        toast("已开始直接保存到手机本地");
+        upsertTask(taskId, { title: item.title || "媒体文件", status: "downloading" });
         setStatus("正在保存到手机本地：" + item.title);
       } catch (e) {
         toast("调用本地下载失败：" + e.message);
@@ -269,12 +471,13 @@
   // 移动端：图集逐张下载。每张用 &zip=0&j=<序号> 取单图，Java 原生写入 DCIM/随手存
   function downloadGalleryAsImages(item) {
     const base = apiUrl(item.download_url);
-    let done = 0;
     for (let j = 0; j < item.count; j++) {
       const url = base + "&zip=0&j=" + j;
+      const taskId = "g" + Date.now() + "_" + item.index + "_" + j;
       try {
-        const started = BRIDGE.download(url, item.title + "_" + (j + 1));
+        const started = BRIDGE.download(url, item.title + "_" + (j + 1), taskId);
         if (started === false) { toast("第 " + (j + 1) + " 张下载启动失败"); }
+        else upsertTask(taskId, { title: item.title + " 第 " + (j + 1) + " 张", status: "downloading" });
       } catch (e) {
         toast("调用本地下载失败：" + e.message);
       }
@@ -283,16 +486,41 @@
     setStatus("正在把 " + item.count + " 张图片逐张保存到手机本地（DCIM/随手存）");
   }
 
-  // Java 原生下载线程通过 evaluateJavascript 回调这里
-  window.onNativeDownload = function (state, filename, message) {
+  // Java 原生下载线程通过 evaluateJavascript 回调这里。
+  // state: progress | done | error | cancelled；taskId 用于归属到任务中心的对应行；
+  // message 在 progress 时是进度 JSON（{bytes,total,speed}），其余为文件名/错误原因。
+  window.onNativeDownload = function (state, filename, taskId, message) {
+    const key = taskId || "";
+    if (state === "progress") {
+      let info = {};
+      try { info = JSON.parse(message || "{}"); } catch (e) { info = {}; }
+      upsertTask(key, {
+        title: TASKS.get(key) ? TASKS.get(key).title : (filename || "媒体文件"),
+        status: "downloading",
+        downloaded: info.bytes || 0,
+        total: info.total || 0,
+      });
+      setStatus("正在保存到手机本地… " + fmtBytes(info.bytes || 0));
+      return;
+    }
     if (state === "done") {
+      const t = TASKS.get(key) || {};
+      upsertTask(key, { title: t.title || filename, status: "done",
+        downloaded: t.total || t.downloaded, total: t.total || t.downloaded });
       setStatus("已保存到手机相册（DCIM/随手存）：" + filename);
       toast("保存完成：" + filename);
-    } else if (state === "error") {
+      return;
+    }
+    if (state === "cancelled") {
+      upsertTask(key, { status: "cancelled", title: (TASKS.get(key) || {}).title || filename });
+      setStatus("已取消保存");
+      return;
+    }
+    if (state === "error") {
+      upsertTask(key, { status: "error", title: (TASKS.get(key) || {}).title || filename,
+        message: message || "未知错误" });
       setStatus("保存失败：" + (message || "未知错误"));
       toast("保存失败：" + (message || "未知错误"));
-    } else if (state === "progress") {
-      setStatus("正在保存到手机本地… " + (message || ""));
     }
   };
 
@@ -302,20 +530,65 @@
     toast("已自动获取移动端抖音登录态并保存");
   };
 
+  /**
+   * Android 系统分享 / 「用其他应用打开」带入的链接。
+   * Java 端在页面就绪后通过 evaluateJavascript 调这里（push 通道）；
+   * 页面就绪前攒下的链接则由 boot() 末尾调用 takeSharedText() 主动拉取（pull 通道）。
+   */
+  window.onSharedLink = function (text) {
+    const t = (text || "").trim();
+    if (!t) return;
+    ingestShared(t);
+  };
+
+  /** 把分享带来的文本填入输入框并立即识别；纯链接与带口令文本都支持。 */
+  function ingestShared(text) {
+    const box = $("input");
+    // 同一个链接不重复追加（避免 push + pull 两次进入）
+    if (box.value.indexOf(text) !== -1) return;
+    box.value = (box.value.trim() ? box.value.trim() + "\n" : "") + text;
+    updateCount();
+    runDetect();
+    toast("已从分享带入链接，点「下载」即可保存");
+    setStatus("已从分享带入链接 · 点下方按钮即可保存到手机");
+    $("result-card").classList.add("hidden");
+    // 分享场景下用户意图明确，滚到顶部让操作栏可见
+    try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { window.scrollTo(0, 0); }
+  }
+
   function renderErrors(results) {
     const lines = [];
     (results || []).forEach((r) => {
-      if (r.error) lines.push({ tag: "解析失败", cls: "err", url: r.url, msg: r.error });
-      (r.warnings || []).forEach((w) => lines.push({ tag: "提示", cls: "warn", url: r.url, msg: w }));
+      if (r.error) lines.push({ tag: "解析失败", cls: "err", url: r.url, msg: r.error, detail: false });
+      (r.warnings || []).forEach((w) => {
+        // 「技术细节：」是给排查用的原始异常，收进可折叠区，不直接铺在主文案里
+        const technical = w.startsWith("技术细节：");
+        lines.push({
+          tag: technical ? "详情" : "提示",
+          cls: technical ? "detail" : "warn",
+          url: r.url,
+          msg: technical ? w.slice("技术细节：".length) : w,
+        });
+      });
     });
     if (!LAST_ITEMS.length && !lines.length) {
       lines.push({ tag: "无结果", cls: "warn", url: "", msg: "没有可下载内容，请确认链接有效后重试" });
     }
-    $("result-errors").innerHTML = lines.map((l) =>
+    const main = lines.filter((l) => l.cls !== "detail");
+    const details = lines.filter((l) => l.cls === "detail");
+    let html = main.map((l) =>
       '<div class="err-line ' + l.cls + '"><span class="tag ' + (l.cls === "err" ? "err" : "") + '">' +
       escapeHtml(l.tag) + "</span> " +
       (l.url ? '<span class="err-url">' + escapeHtml(l.url) + "</span> — " : "") +
       escapeHtml(l.msg) + "</div>").join("");
+    if (details.length) {
+      html += '<details class="err-details"><summary>技术详情（' + details.length + '）</summary>' +
+        details.map((l) =>
+          '<div class="err-line detail"><span class="err-url">' +
+          escapeHtml(l.url || "") + "</span> " + escapeHtml(l.msg) + "</div>").join("") +
+        "</details>";
+    }
+    $("result-errors").innerHTML = html;
   }
 
   function renderResults(data) {
@@ -443,11 +716,17 @@
     }
   }
 
-  function downloadAll() {
+  async function downloadAll() {
     if (!LAST_ITEMS.length) { toast("请先解析链接"); return; }
-    LAST_ITEMS.forEach((item, i) => setTimeout(() => triggerDownload(item), i * 420));
-    setStatus(NATIVE ? "已开始把 " + LAST_ITEMS.length + " 项保存到手机" :
-      "已把 " + LAST_ITEMS.length + " 项交给浏览器下载");
+    if (NATIVE) {
+      // 移动端：逐条原生下载，各自进入任务中心（带 taskId，可单独取消）
+      LAST_ITEMS.forEach((item, i) => setTimeout(() => triggerDownload(item), i * 260));
+      setStatus("已开始把 " + LAST_ITEMS.length + " 项保存到手机");
+      return;
+    }
+    // PC 端：交给后端后台任务队列，前端可见进度 / 速度 / 取消
+    await startPcJob($("input").value.trim());
+    setStatus("已创建下载任务 · 共 " + LAST_ITEMS.length + " 项，可在「下载任务」中查看进度");
   }
 
   async function pasteFromClipboard() {
@@ -547,7 +826,16 @@
       toast("无法连接本机服务：" + e.message);
     }
     // APP 内登录获取的抖音登录态：自动填充并提示，避免手动复制；首次还会自动静默探测
-    if (IS_APK) { refreshCookieStatus().then(() => maybeAutoOpenLogin()); }
+    if (IS_APK) {
+      refreshCookieStatus().then(() => maybeAutoOpenLogin());
+      // 拉取冷启动时 Java 端攒下的分享链接（push 通道的兜底）
+      if (BRIDGE && typeof BRIDGE.takeSharedText === "function") {
+        try {
+          const shared = BRIDGE.takeSharedText();
+          if (shared && shared.trim()) ingestShared(shared.trim());
+        } catch (e) { /* 忽略 */ }
+      }
+    }
   }
 
   async function refreshCookieStatus() {
@@ -602,6 +890,7 @@
   $("btn-download").addEventListener("click", () => parseAndDownload(true));
   $("btn-parse").addEventListener("click", () => parseAndDownload(false));
   $("btn-download-all").addEventListener("click", downloadAll);
+  $("btn-clear-jobs").addEventListener("click", clearFinishedTasks);
   $("btn-paste").addEventListener("click", pasteFromClipboard);
   $("btn-clear").addEventListener("click", () => {
     $("input").value = ""; updateCount(); renderDetect([]);
