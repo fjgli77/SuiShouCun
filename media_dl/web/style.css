@@ -132,6 +132,13 @@ textarea::placeholder { color: #a3acbb; }
 }
 .cookie-field textarea:focus { border-color: var(--primary); background: #fff; }
 .cookie-field .hint { color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.field .hint { color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.hint.env-hint {
+  display: block; color: var(--amber); font-size: 11.5px; line-height: 1.5;
+  margin: 8px 0 0; padding: 7px 10px; border-radius: 8px;
+  background: var(--amber-soft, rgba(245, 185, 66, .12));
+}
+.hint.hidden { display: none; }
 body.is-mobile .cookie-field textarea { background: rgba(0,0,0,.18); }
 
 /* 自定义下拉框（原生 select 的弹出列表样式无法控制） */
@@ -188,8 +195,9 @@ body.is-mobile .cookie-field textarea { background: rgba(0,0,0,.18); }
 }
 
 /* 结果 */
-.result-list { display: grid; gap: 9px; }
-.result-item { border: 1px solid var(--border); border-radius: 11px; padding: 12px 14px; background: var(--surface-2); }
+.result-list { display: grid; gap: 9px; min-width: 0; }
+.result-item { border: 1px solid var(--border); border-radius: 11px; padding: 12px 14px;
+  background: var(--surface-2); min-width: 0; max-width: 100%; }
 .ri-main { display: flex; align-items: center; gap: 13px; }
 .ri-thumb {
   flex: none; width: 76px; height: 58px; border-radius: 9px; overflow: hidden;
@@ -212,8 +220,76 @@ body.is-mobile .cookie-field textarea { background: rgba(0,0,0,.18); }
 .badge { font-size: 11.5px; padding: 3px 9px; border-radius: 999px; background: var(--primary-soft); color: var(--primary); }
 .err-line { margin-top: 10px; font-size: 12px; color: var(--red); word-break: break-all; }
 .err-line.warn { color: var(--amber); }
+.err-line.detail { color: var(--muted); margin-top: 6px; }
+.err-details { margin-top: 10px; font-size: 12px; }
+.err-details > summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+.err-details[open] > summary { margin-bottom: 4px; }
 .err-url { font-family: Consolas, monospace; font-size: 11.5px; color: var(--muted); word-break: break-all; }
 .tip { font-size: 12px; color: var(--muted); margin: 12px 0 0; line-height: 1.65; }
+/* 兜底：卡片内可能混入超长不可断字符串（URL、文件名、服务端报错原文）。
+   统一允许任意位置断行，避免任何一处把栅格 / 卡片顶宽（同 .job-item 那类溢出）。 */
+.guide-body, .tip, .err-details, .err-line, .err-url, .status, .toast { overflow-wrap: anywhere; }
+
+/* 下载任务中心 */
+.jobs-list { display: grid; gap: 9px; min-width: 0; }
+/* 关键：grid / flex 子项的自动最小尺寸 = min-content。当标题是 white-space:nowrap 时，
+   min-content 就等于整条标题的像素宽度，会把栅格轨道（以及整张页面）一起顶宽。
+   实测：396px 的列表被一条长标题撑到 718px，页面横向溢出 291px，
+   在 WebView 里表现为整页错位、文字被裁成「半句」。所以凡可能落入长文本的
+   容器都必须显式 min-width: 0，让溢出去走省略号 / 折行，而不是撑破布局。 */
+.job-item { border: 1px solid var(--border); border-radius: 11px; padding: 12px 14px;
+  background: var(--surface-2); min-width: 0; max-width: 100%; }
+.job-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.job-title { flex: 1 1 auto; min-width: 0; font-size: 13.5px; font-weight: 500; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.job-top .tag, .job-top .job-cancel { flex: none; }
+.job-cancel { font-size: 11.5px; padding: 2px 10px; min-height: 26px;
+  border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.job-cancel:hover { border-color: var(--red); color: var(--red); }
+.job-bar { margin-top: 9px; height: 7px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.job-bar > i { display: block; height: 100%; width: 0; border-radius: 999px;
+  background: var(--primary); transition: width .25s ease; }
+.job-item.done .job-bar > i { background: var(--green); }
+.job-item.error .job-bar > i { background: var(--red); }
+.job-item.cancelled .job-bar > i { background: var(--amber); }
+.job-meta { margin-top: 6px; font-size: 11.5px; color: var(--muted); min-width: 0;
+  font-family: Consolas, monospace; display: flex; gap: 10px; flex-wrap: wrap; }
+.job-item.error .job-meta { color: var(--red); font-family: inherit; }
+/* 不确定进度（总量未知）时的滚动条纹 */
+.job-bar.indet > i { width: 38%; animation: jobslide 1.1s linear infinite; }
+@keyframes jobslide { from { margin-left: -38%; } to { margin-left: 100%; } }
+
+/* 首启引导卡片 */
+.guide-body { font-size: 13px; line-height: 1.75; color: var(--text); }
+.guide-body p { margin: 0 0 8px; }
+.guide-body .guide-row { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; }
+.guide-body .guide-ico { flex: none; width: 20px; text-align: center; }
+.guide-body ul { margin: 6px 0 8px; padding-left: 20px; }
+.guide-body li { margin: 3px 0; }
+.guide-body code {
+  font-family: Consolas, monospace; font-size: 12px; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px;
+}
+.guide-note { color: var(--muted); font-size: 12px; }
+.guide-body .warn-flag { color: var(--amber); font-weight: 560; }
+
+/* 媒体库（已下载）：默认收起，展开后展示列表 */
+.library-body.collapsed { display: none; }
+.library-body { margin-top: 4px; }
+.lib-tools { margin-bottom: 9px; }
+.library-list { display: grid; gap: 9px; min-width: 0; }
+.lib-item { border: 1px solid var(--border); border-radius: 11px; padding: 11px 13px; background: var(--surface-2);
+  display: flex; align-items: center; gap: 12px; min-width: 0; max-width: 100%; }
+.lib-ico { flex: none; width: 42px; height: 42px; border-radius: 10px; display: flex;
+  align-items: center; justify-content: center; font-size: 20px; background: var(--primary-soft); }
+.lib-ico.video { background: #e7f0ff; }
+.lib-ico.image { background: var(--green-soft); }
+.lib-ico.audio { background: #f0edff; }
+.lib-info { flex: 1; min-width: 0; }
+.lib-name { font-size: 13px; font-weight: 520; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-meta { margin-top: 4px; font-size: 11.5px; color: var(--muted);
+  font-family: Consolas, monospace; display: flex; gap: 10px; flex-wrap: wrap; }
+.lib-actions { flex: none; display: flex; gap: 6px; }
 
 /* 操作栏（PC 上是普通块） */
 .action-bar { max-width: 1000px; margin: 0 auto 8px; padding: 0 22px; }
@@ -391,6 +467,27 @@ body.is-mobile .ri-thumb { width: 68px; height: 54px; }
 body.is-mobile .ri-quality .dd { min-width: 88px; }
 body.is-mobile .ri-quality .dd-btn { min-height: 38px; font-size: 13px; padding: 5px 10px; border-radius: 10px; }
 body.is-mobile .ri-actions .btn { flex: 1; }
+body.is-mobile .job-item { border-radius: 16px; padding: 14px; }
+/* 任务标题在移动端也折行并最多两行：与结果条 / 媒体库一致。
+   单行 + nowrap 会把标题裁成「半句」，长标题（尤其带口播文案的）几乎必然触发。 */
+body.is-mobile .job-title {
+  white-space: normal; word-break: break-word; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; line-height: 1.4;
+}
+body.is-mobile .job-top { align-items: flex-start; }
+body.is-mobile .job-bar { height: 8px; }
+body.is-mobile .job-cancel { min-height: 34px; padding: 4px 14px; font-size: 12.5px; }
+/* 媒体库：移动端整行更宽松，文件名最多两行 */
+body.is-mobile .lib-item { border-radius: 16px; padding: 12px; }
+body.is-mobile .lib-name { white-space: normal; word-break: break-word; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; }
+body.is-mobile .lib-ico { background: rgba(53, 224, 176, .14); }
+body.is-mobile .lib-ico.video { background: rgba(90, 160, 255, .16); }
+body.is-mobile .lib-ico.image { background: rgba(53, 224, 176, .14); }
+body.is-mobile .lib-actions .btn { min-height: 38px; }
+body.is-mobile .lib-tools { margin-bottom: 11px; }
+body.is-mobile .library-list { gap: 10px; }
 body.is-mobile .detect-chip { background: rgba(255,255,255,.06); border-radius: 999px; }
 body.is-mobile .detect-chip .du { max-width: 150px; }
 body.is-mobile .err-line.warn { color: var(--amber); }

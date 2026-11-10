@@ -1,6 +1,8 @@
 /* PWA：只缓存同一套界面静态资源。API 与下载请求一律走网络。
-   v6 起 PC 与移动端是同一个页面 /，不再有 /m 与 /pc 两套资源。 */
-const CACHE = "media-dl-v6";
+   v6 起 PC 与移动端是同一个页面 /，不再有 /m 与 /pc 两套资源。
+   下面的缓存名占位符由服务端返回本文件时替换为真实版本号，
+   保证改版后缓存名随之变化、用户不会一直拿到旧 app.js。 */
+const CACHE = "media-dl-__VERSION__";
 const ASSETS = [
   "/",
   "/static/style.css",

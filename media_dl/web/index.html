@@ -34,6 +34,15 @@
   </div>
 
   <main>
+    <!-- 首启引导：只在需要时出现（缺 ffmpeg / 首次使用），可一键关闭，不打扰 -->
+    <section class="card hidden" id="guide-card">
+      <div class="card-head">
+        <h2 id="guide-title">开始使用</h2>
+        <button class="btn btn-ghost btn-sm" id="btn-guide-close">知道了</button>
+      </div>
+      <div id="guide-body" class="guide-body"></div>
+    </section>
+
     <section class="card" id="input-card">
       <div class="card-head">
         <h2>粘贴链接</h2>
@@ -44,13 +53,14 @@
     </section>
 
     <section class="card" id="settings-card">
-      <div class="card-head clickable" id="settings-head">
+      <div class="card-head clickable" id="settings-head" role="button" tabindex="0"
+           aria-controls="settings" aria-expanded="true">
         <h2>下载设置</h2>
-        <span class="muted">展开 / 收起 <span id="settings-arrow">▾</span></span>
+        <span class="muted">展开 / 收起 <span id="settings-arrow" aria-hidden="true">▾</span></span>
       </div>
       <div class="settings" id="settings">
         <label class="field">
-          <span>画质上限</span>
+          <span>默认画质</span>
           <div class="dd" id="dd-quality">
             <input type="hidden" id="opt-quality" value="best">
             <button type="button" class="dd-btn" aria-haspopup="listbox"></button>
@@ -62,6 +72,7 @@
               <button type="button" class="dd-opt" data-value="480">480P</button>
             </div>
           </div>
+          <small class="hint">用于所有视频；解析结果里可对单条再单独选画质（覆盖此默认值）</small>
         </label>
         <label class="field">
           <span>最多图片数 / 每个图集</span>
@@ -90,6 +101,8 @@
           <small class="hint">仅用于免 Cookie 通道取不到的抖音图文 / 登录作品；其余仍免 Cookie。Cookie 只发往抖音，不上传到任何服务器。</small>
           <small class="hint cookie-status" id="cookie-status"></small>
         </label>
+        <!-- 缺 ffmpeg 时的低调提示：首次用卡片说明，之后只保留这一行，不打扰 -->
+        <small class="hint env-hint hidden" id="ffmpeg-hint"></small>
       </div>
     </section>
 
@@ -105,9 +118,41 @@
       <div id="result-list" class="result-list"></div>
       <p class="tip" id="result-tip"></p>
     </section>
+
+    <!-- 下载任务中心：过程可见（进度 / 速度 / 剩余时间 / 取消） -->
+    <section class="card hidden" id="jobs-card">
+      <div class="card-head">
+        <h2>下载任务</h2>
+        <div class="row">
+          <span class="badge" id="jobs-summary"></span>
+          <button class="btn btn-ghost btn-sm" id="btn-clear-jobs">清除已完成</button>
+        </div>
+      </div>
+      <div id="jobs-list" class="jobs-list"></div>
+    </section>
+
+    <!-- 已下载 / 媒体库：DCIM/随手存 与下载目录里的内容，随时回看、重新保存
+         默认收起，点标题栏展开，避免一长串历史把首屏撑长 -->
+    <section class="card hidden" id="library-card">
+      <div class="card-head clickable" id="library-head" role="button" tabindex="0"
+           aria-controls="library-body" aria-expanded="false">
+        <h2>已下载</h2>
+        <div class="row">
+          <span class="badge" id="library-summary"></span>
+          <span class="muted" id="library-arrow" aria-hidden="true">▸</span>
+        </div>
+      </div>
+      <div class="library-body collapsed" id="library-body">
+        <div class="row lib-tools">
+          <span class="grow"></span>
+          <button class="btn btn-ghost btn-sm" id="btn-refresh-library">刷新</button>
+        </div>
+        <div id="library-list" class="library-list" role="list" aria-label="已下载文件"></div>
+      </div>
+    </section>
   </main>
 
-  <div class="status" id="status">已就绪 · 粘贴链接后点下方按钮</div>
+  <div class="status" id="status" role="status" aria-live="polite">已就绪 · 粘贴链接后点下方按钮</div>
 </div>
 
 <!-- 底部操作栏：PC 上是普通一行，移动端固定到屏幕底部 -->
@@ -115,6 +160,8 @@
   <div class="tools">
     <button class="btn btn-ghost btn-sm" id="btn-paste">粘贴</button>
     <button class="btn btn-ghost btn-sm" id="btn-clear">清空</button>
+    <button class="btn btn-ghost btn-sm" id="btn-library">已下载</button>
+    <button class="btn btn-ghost btn-sm" id="btn-help" title="随时回看使用说明">使用说明</button>
     <span class="grow"></span>
     <span class="nw" id="wm-chip">去水印 · 免 Cookie</span>
   </div>
@@ -137,7 +184,7 @@
   </div>
 </div>
 
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -31,6 +31,8 @@ from .links import detect_media
 from .models import Progress
 from .options import DownloadOptions, has_ffmpeg
 from .qr import qr_svg
+from . import app_state, secure_store
+from .version import __version_short__
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 app = Flask(__name__, static_folder=None)
@@ -41,23 +43,32 @@ _LOCK = threading.RLock()
 _DEFAULT_OUTDIR = Path.cwd() / "downloads"
 
 # APP 内登录抖音自动捕获的登录态 Cookie：仅在本机保存与使用，只发往抖音，绝不上传。
-_DATA_DIR = Path(__file__).resolve().parent / "data"
+# 落盘经 secure_store 加密（Windows=DPAPI 绑定当前用户；其它平台=沙箱隔离），
+# 备份 / 导出 / 复制到别的机器都无法还原明文。
+#
+# 目录由 app_state 统一解析：EXE 的 onefile 临时目录与 Android 的版本重建目录都会
+# 清空包目录，状态放那里必然「每次启动都像第一次」。
+_DATA_DIR = app_state.state_dir()
 _COOKIE_STORE = _DATA_DIR / "cookie_store.txt"
 
 
 def _load_cookie_store() -> str:
-    try:
-        if _COOKIE_STORE.exists():
-            return _COOKIE_STORE.read_text(encoding="utf-8").strip()
-    except Exception:                       # noqa: BLE001
-        return ""
+    text = secure_store.read_secret(_COOKIE_STORE)
+    if text:
+        return text
+    # 兼容旧版：v6.2 及以前写在包目录 data/ 下，升级后迁一次，不让用户重新登录
+    legacy = app_state.legacy_data_dir() / "cookie_store.txt"
+    if legacy != _COOKIE_STORE and legacy.exists():
+        old = secure_store.read_secret(legacy)
+        if old:
+            _save_cookie_store(old)
+            return old
     return ""
 
 
 def _save_cookie_store(cookie: str) -> None:
     try:
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _COOKIE_STORE.write_text((cookie or "").strip(), encoding="utf-8")
+        secure_store.write_secret(_COOKIE_STORE, (cookie or "").strip())
     except Exception:                       # noqa: BLE001
         pass
 
@@ -71,6 +82,31 @@ _STATE: dict[str, Any] = {
 
 def _is_local() -> bool:
     return request.remote_addr in ("127.0.0.1", "::1")
+
+
+# 把内部异常翻译成用户可读文案：主文案不含英文异常类名，原始信息留作技术详情。
+_ERROR_HINTS: tuple[tuple[str, str], ...] = (
+    ("403", "平台拒绝匿名访问（风控），请稍后重试或改用分享口令"),
+    ("401", "该内容需要登录后才能访问"),
+    ("404", "内容不存在或链接已失效"),
+    ("429", "请求过于频繁被限流，请稍后再试"),
+    ("timed out", "网络请求超时，请检查网络后重试"),
+    ("timeout", "网络请求超时，请检查网络后重试"),
+    ("connection", "网络连接失败，请检查网络后重试"),
+    ("ssl", "加密连接异常，请检查网络环境后重试"),
+    ("已过期", "下载链接已过期，请重新解析后再下载"),
+    ("不可用", "媒体地址暂时不可用，请稍后重试"),
+    ("没有产生文件", "下载未产生文件，请重试"),
+)
+
+
+def _friendly_error(exc: Exception, fallback: str = "操作失败，请稍后重试") -> str:
+    """把异常翻译成面向用户的短文案（不含英文类名 / 堆栈）。"""
+    text = f"{type(exc).__name__} {exc}".lower()
+    for needle, hint in _ERROR_HINTS:
+        if needle.lower() in text:
+            return hint
+    return fallback
 
 
 def runtime() -> str:
@@ -138,7 +174,14 @@ def manifest():
 
 @app.get("/sw.js")
 def service_worker():
-    resp = make_response(send_from_directory(WEB_DIR, "sw.js"))
+    # 注入真实版本号到缓存名，改版后自动换缓存，避免用户拿到旧静态资源
+    try:
+        src = (WEB_DIR / "sw.js").read_text(encoding="utf-8")
+    except Exception:                       # noqa: BLE001
+        return send_from_directory(WEB_DIR, "sw.js")
+    src = src.replace("__VERSION__", __version_short__)
+    resp = make_response(src)
+    resp.headers["Content-Type"] = "application/javascript; charset=utf-8"
     resp.headers["Service-Worker-Allowed"] = "/"
     resp.headers["Cache-Control"] = "no-cache"
     return resp
@@ -165,12 +208,25 @@ def api_config():
         "watermark_free": True,
         "preview": True,
         "nocookie": True,
-        "version": "6.1",
+        "version": __version_short__,
         "runtime": current,
         "client": current,
+        # 敏感数据（登录态 Cookie）落盘加密后端：dpapi=已加密 / plain=仅沙箱隔离
+        "secure_store": secure_store.backend(),
         # 前端能力开关：Android 上有 Java 原生下载，PC 上交给浏览器
         "native_download": current == "android",
+        # 首启引导：只有从未完成过才为 true，之后进入不再显示（跨重启 / 跨升级都记得）
+        "first_run": app_state.is_first_run(),
     })
+
+
+@app.post("/api/first-run-done")
+def api_first_run_done():
+    """标记首启引导已完成。写在本机持久目录，重装之前都不会再自动弹出。"""
+    if not _is_local():
+        return jsonify({"error": "只允许本机调用"}), 403
+    app_state.mark_first_run_done()
+    return jsonify({"ok": True, "first_run": False})
 
 
 @app.post("/api/auth")
@@ -192,7 +248,8 @@ def api_set_cookie():
 def api_get_cookie():
     """前端读取本机是否已存有登录态 Cookie（用于显示状态 / 自动填充）。"""
     c = _load_cookie_store()
-    return jsonify({"cookie": c, "has_cookie": bool(c)})
+    return jsonify({"cookie": c, "has_cookie": bool(c),
+                    "secure_store": secure_store.backend()})
 
 
 @app.post("/api/shutdown")
@@ -251,7 +308,7 @@ def api_parse():
             "remove_watermark": opts.remove_watermark,
         })
     except Exception as exc:                          # noqa: BLE001
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _friendly_error(exc, "解析失败，请确认链接可公开访问或稍后重试")}), 500
 
 
 @app.get("/api/fetch")
@@ -283,7 +340,7 @@ def api_fetch():
     except LookupError as exc:
         return jsonify({"error": str(exc)}), 404
     except Exception as exc:                          # noqa: BLE001
-        return jsonify({"error": f"下载失败：{str(exc)[:240]}"}), 502
+        return jsonify({"error": _friendly_error(exc, "下载失败，请稍后重试")}), 502
 
 
 @app.get("/api/thumb")
@@ -354,6 +411,22 @@ def api_cancel_job(jid: str):
         return jsonify({"ok": True})
 
 
+_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
+_VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".ts"}
+_AUDIO_EXT = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg"}
+
+
+def _kind_of(name: str) -> str:
+    ext = Path(name).suffix.lower()
+    if ext in _IMAGE_EXT:
+        return "image"
+    if ext in _VIDEO_EXT:
+        return "video"
+    if ext in _AUDIO_EXT:
+        return "audio"
+    return "other"
+
+
 @app.get("/api/files")
 def api_files():
     data = _current_outdir()
@@ -361,16 +434,30 @@ def api_files():
     if data.exists():
         for p in sorted(data.rglob("*"), key=lambda x: x.stat().st_mtime, reverse=True)[:100]:
             if p.is_file() and not p.name.endswith((".part", ".ytdl")):
+                st = p.stat()
+                rel = str(p.relative_to(data))
                 files.append({
                     "name": p.name, "path": str(p),
-                    "rel": str(p.relative_to(data)), "size": p.stat().st_size,
-                    "time": p.stat().st_mtime,
+                    "rel": rel, "size": st.st_size, "time": st.st_mtime,
+                    "kind": _kind_of(p.name),
+                    # 子目录名（如 bilibili / douyin），供界面分组展示去向
+                    "group": rel.split("/")[0] if "/" in rel else "",
                 })
     return jsonify({"outdir": str(data), "files": files})
 
 
 def _safe_file_path() -> Path | None:
-    path = Path(str(request.args.get("path") or "")).resolve()
+    # 路径来源：GET 走查询参数（/api/file?path=…），POST 走 JSON body（/api/reveal 等）。
+    raw = request.args.get("path")
+    if not raw:
+        body = request.get_json(silent=True) or {}
+        raw = body.get("path")
+    if not raw:
+        return None
+    try:
+        path = Path(str(raw)).resolve()
+    except (OSError, ValueError):
+        return None
     root = _current_outdir().resolve()
     if not path.exists() or not path.is_file() or root not in path.parents:
         return None
@@ -391,6 +478,41 @@ def api_download():
     if not path:
         return jsonify({"error": "文件不存在"}), 404
     return send_file(path, as_attachment=True, download_name=path.name, conditional=True)
+
+
+@app.post("/api/reveal")
+def api_reveal():
+    """PC 端「打开所在文件夹」：在资源管理器 / 文件管理器里定位到该文件。仅本机可用。"""
+    if not _is_local():
+        return jsonify({"error": "只允许本机调用"}), 403
+    path = _safe_file_path()
+    if not path:
+        return jsonify({"error": "文件不存在"}), 404
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path.parent)])
+    except Exception as exc:                          # noqa: BLE001
+        return jsonify({"error": _friendly_error(exc, "无法打开文件夹")}), 500
+    return jsonify({"ok": True})
+
+
+@app.post("/api/delete-file")
+def api_delete_file():
+    """删除已下载的文件（含对应缩略图）。仅本机可用，仅限下载目录内。"""
+    if not _is_local():
+        return jsonify({"error": "只允许本机调用"}), 403
+    path = _safe_file_path()
+    if not path:
+        return jsonify({"error": "文件不存在"}), 404
+    try:
+        path.unlink()
+    except Exception as exc:                          # noqa: BLE001
+        return jsonify({"error": _friendly_error(exc, "删除失败")}), 500
+    return jsonify({"ok": True})
 
 
 # --------------------------------------------------------------------------- #
@@ -479,20 +601,22 @@ def _run_job(jid: str) -> None:
                                 job["files"].append(f)
                 except RuntimeError as exc:
                     if "取消" not in str(exc):
+                        friendly = _friendly_error(exc, "下载失败，请稍后重试")
                         _log(job, f"失败 {entry.title}: {exc}")
                         with _LOCK:
-                            job["errors"].append(f"{entry.title}: {exc}")
+                            job["errors"].append(f"{entry.title}: {friendly}")
                             job["cards"][entry.id] = Progress(
                                 entry_id=entry.id, status="error", title=entry.title,
-                                message=str(exc)).to_dict()
+                                message=friendly).to_dict()
                     break
                 except Exception as exc:                  # noqa: BLE001
+                    friendly = _friendly_error(exc, "下载失败，请稍后重试")
                     _log(job, f"失败 {entry.title}: {exc}")
                     with _LOCK:
-                        job["errors"].append(f"{entry.title}: {str(exc)[:300]}")
+                        job["errors"].append(f"{entry.title}: {friendly}")
                         job["cards"][entry.id] = Progress(
                             entry_id=entry.id, status="error", title=entry.title,
-                            message=str(exc)[:300]).to_dict()
+                            message=friendly).to_dict()
             if cancel.is_set():
                 break
 
@@ -503,7 +627,7 @@ def _run_job(jid: str) -> None:
     except Exception as exc:                              # noqa: BLE001
         with _LOCK:
             job["status"] = "error"
-            job["errors"].append(str(exc))
+            job["errors"].append(_friendly_error(exc, "任务执行异常，请重试"))
             job["finished"] = time.time()
         _log(job, f"任务异常: {exc}")
 
@@ -579,7 +703,7 @@ def run_server(
 
     local_url = f"http://127.0.0.1:{port}"
     print("\n" + "=" * 62)
-    print("  随手存 v6.1 · 一个应用，PC / Android 各自本机运行")
+    print(f"  随手存 v{__version_short__} · 一个应用，PC / Android 各自本机运行")
     print(f"  运行位置  : {'Android APK' if current == 'android' else 'Windows EXE'}")
     print(f"  界面地址  : {local_url}/")
     print("  下载方式  : " + ("Java 原生写入手机存储" if current == "android" else "交给浏览器下载管理器"))

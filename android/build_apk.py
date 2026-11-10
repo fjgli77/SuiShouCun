@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -30,6 +31,29 @@ BUILD = HERE / "build"
 VENDOR = HERE / "vendor"
 CN_NAME = "随手存-手机版"
 ASCII_NAME = "SuiShouCun-Mobile"
+
+
+def read_version() -> tuple[str, int]:
+    """从 media_dl/version.py 读版本号（唯一真源），避免清单里再硬编码一份。"""
+    src = (ROOT / "media_dl" / "version.py").read_text(encoding="utf-8")
+    name = re.search(r'^__version__\s*=\s*"([^"]+)"', src, re.MULTILINE)
+    code = re.search(r"^__version_code__\s*=\s*(\d+)", src, re.MULTILINE)
+    if not name or not code:
+        raise SystemExit("media_dl/version.py 缺少 __version__ / __version_code__")
+    return name.group(1), int(code.group(1))
+
+
+def render_manifest() -> Path:
+    """把版本号注入 AndroidManifest.xml，输出到 build/ 供 aapt2 使用。"""
+    name, code = read_version()
+    src = (HERE / "AndroidManifest.xml").read_text(encoding="utf-8")
+    src = re.sub(r'android:versionCode="[^"]*"', f'android:versionCode="{code}"', src, count=1)
+    src = re.sub(r'android:versionName="[^"]*"', f'android:versionName="{name}"', src, count=1)
+    BUILD.mkdir(parents=True, exist_ok=True)
+    out = BUILD / "AndroidManifest.xml"
+    out.write_text(src, encoding="utf-8")
+    print(f"    版本号注入：versionName={name} versionCode={code}", flush=True)
+    return out
 
 BT_VERSION = "36.0.0"
 PLATFORM = "android-34"
@@ -50,6 +74,9 @@ SITE_PACKAGES = [
 ]
 SKIP_SUFFIXES = {".pyc", ".pyo", ".pyd", ".so", ".dll", ".dylib", ".exe", ".a", ".lib"}
 SKIP_DIRS = {"__pycache__", ".git", "tests", "test"}
+# 运行期数据目录：绝不能进包。里面是用户登录态 Cookie（cookie_store.txt）与首启状态，
+# 一旦被打进发行包，等于把构建机主人的账号随 APK 发出去。
+SKIP_TREE = {"data"}
 
 
 # --------------------------------------------------------------------------- #
@@ -188,10 +215,16 @@ def site_packages_dir() -> Path:
     return Path(sysconfig.get_paths()["purelib"])
 
 
-def copy_tree(src: Path, dst: Path) -> None:
-    """复制纯 Python 包：排除原生扩展、缓存、测试与打包元数据。"""
+def copy_tree(src: Path, dst: Path, skip_tree: set[str] | None = None) -> None:
+    """复制纯 Python 包：排除原生扩展、缓存、测试与打包元数据。
+
+    ``skip_tree`` 用于额外的顶层目录名黑名单，用来剔除运行期数据目录。
+    """
+    skip_tree = skip_tree or set()
     for root, dirs, files in os.walk(src):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.endswith(".dist-info")]
+        dirs[:] = [d for d in dirs
+                   if d not in SKIP_DIRS and d not in skip_tree
+                   and not d.endswith(".dist-info")]
         rel = Path(root).relative_to(src)
         target = dst / rel
         target.mkdir(parents=True, exist_ok=True)
@@ -239,11 +272,17 @@ def prepare_assets(runtime: Path) -> Path:
     shutil.copy2(VENDOR / STDLIB_ZIP, py / "stdlib.zip")
 
     # 与 PC EXE 完全相同的 media_dl 源码与前端
+    # （skip_tree 剔除 data/：里面是构建机的登录态 Cookie，绝不能随包发出去）
     src_pkg = ROOT / "media_dl"
     dst_pkg = py / "app" / "media_dl"
-    copy_tree(src_pkg, dst_pkg)
+    copy_tree(src_pkg, dst_pkg, skip_tree=SKIP_TREE)
     if not (dst_pkg / "__init__.py").exists() or not (dst_pkg / "web" / "index.html").exists():
         raise SystemExit("media_dl 源码 / 前端复制不完整")
+    for leaked in SKIP_TREE:
+        if (dst_pkg / leaked).exists():
+            raise SystemExit(f"运行期数据目录 {leaked}/ 不应进包：请检查 copy_tree 的 skip_tree")
+    if not (dst_pkg / "app_state.py").exists():
+        raise SystemExit("app_state.py 未打入 APK（首启状态将无法持久化）")
 
     # 纯 Python 依赖（从开发环境的 site-packages 取，剔除 Windows 原生扩展）
     # 注意：必须连同同级 *.dist-info 一起复制，否则 importlib.metadata 取不到版本
@@ -345,8 +384,9 @@ def main() -> int:
 
     # 2. 基础包（含 assets）
     base_apk = BUILD / "base.apk"
+    manifest = render_manifest()
     run([str(aapt2), "link", "-o", str(base_apk), "-I", str(android_jar),
-         "--manifest", str(HERE / "AndroidManifest.xml"),
+         "--manifest", str(manifest),
          "-R", str(compiled), "--auto-add-overlay",
          "-A", str(assets),
          "--java", str(BUILD / "gen"),
@@ -358,7 +398,8 @@ def main() -> int:
     classes = BUILD / "classes"
     classes.mkdir(parents=True)
     java_src = HERE / "java" / "com" / "suishoucun" / "app"
-    java_files = [str(java_src / "MainActivity.java"), str(java_src / "PyService.java")]
+    java_files = [str(java_src / "MainActivity.java"), str(java_src / "PyService.java"),
+                  str(java_src / "DownloadService.java")]
     run([javac, "--release", "8", "-encoding", "UTF-8", "-Xlint:-options",
          "-cp", str(android_jar), "-d", str(classes)] + java_files,
         "javac 编译 Java 源码")

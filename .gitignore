@@ -32,7 +32,9 @@ verify*.txt
 shot.png
 
 # ===== 本机应用日志（在 %LOCALAPPDATA%）=====
-SuiShouCun/
+# 注意：必须锚定到仓库根，否则 Windows 大小写不敏感会误伤源码目录
+# android/java/com/suishoucun/（与 SuiShouCun 同名）——那会让全部 Java 源码进不了版本库。
+/SuiShouCun/
 
 # ===== 编辑器 / 系统 =====
 .vscode/
