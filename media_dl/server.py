@@ -31,6 +31,7 @@ from .links import detect_media
 from .models import Progress
 from .options import DownloadOptions, has_ffmpeg
 from .qr import qr_svg
+from . import secure_store
 from .version import __version_short__
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -42,23 +43,19 @@ _LOCK = threading.RLock()
 _DEFAULT_OUTDIR = Path.cwd() / "downloads"
 
 # APP 内登录抖音自动捕获的登录态 Cookie：仅在本机保存与使用，只发往抖音，绝不上传。
+# 落盘经 secure_store 加密（Windows=DPAPI 绑定当前用户；其它平台=沙箱隔离），
+# 备份 / 导出 / 复制到别的机器都无法还原明文。
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 _COOKIE_STORE = _DATA_DIR / "cookie_store.txt"
 
 
 def _load_cookie_store() -> str:
-    try:
-        if _COOKIE_STORE.exists():
-            return _COOKIE_STORE.read_text(encoding="utf-8").strip()
-    except Exception:                       # noqa: BLE001
-        return ""
-    return ""
+    return secure_store.read_secret(_COOKIE_STORE)
 
 
 def _save_cookie_store(cookie: str) -> None:
     try:
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _COOKIE_STORE.write_text((cookie or "").strip(), encoding="utf-8")
+        secure_store.write_secret(_COOKIE_STORE, (cookie or "").strip())
     except Exception:                       # noqa: BLE001
         pass
 
@@ -194,6 +191,8 @@ def api_config():
         "version": __version_short__,
         "runtime": current,
         "client": current,
+        # 敏感数据（登录态 Cookie）落盘加密后端：dpapi=已加密 / plain=仅沙箱隔离
+        "secure_store": secure_store.backend(),
         # 前端能力开关：Android 上有 Java 原生下载，PC 上交给浏览器
         "native_download": current == "android",
     })
@@ -218,7 +217,8 @@ def api_set_cookie():
 def api_get_cookie():
     """前端读取本机是否已存有登录态 Cookie（用于显示状态 / 自动填充）。"""
     c = _load_cookie_store()
-    return jsonify({"cookie": c, "has_cookie": bool(c)})
+    return jsonify({"cookie": c, "has_cookie": bool(c),
+                    "secure_store": secure_store.backend()})
 
 
 @app.post("/api/shutdown")
@@ -380,6 +380,22 @@ def api_cancel_job(jid: str):
         return jsonify({"ok": True})
 
 
+_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
+_VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".ts"}
+_AUDIO_EXT = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg"}
+
+
+def _kind_of(name: str) -> str:
+    ext = Path(name).suffix.lower()
+    if ext in _IMAGE_EXT:
+        return "image"
+    if ext in _VIDEO_EXT:
+        return "video"
+    if ext in _AUDIO_EXT:
+        return "audio"
+    return "other"
+
+
 @app.get("/api/files")
 def api_files():
     data = _current_outdir()
@@ -387,16 +403,30 @@ def api_files():
     if data.exists():
         for p in sorted(data.rglob("*"), key=lambda x: x.stat().st_mtime, reverse=True)[:100]:
             if p.is_file() and not p.name.endswith((".part", ".ytdl")):
+                st = p.stat()
+                rel = str(p.relative_to(data))
                 files.append({
                     "name": p.name, "path": str(p),
-                    "rel": str(p.relative_to(data)), "size": p.stat().st_size,
-                    "time": p.stat().st_mtime,
+                    "rel": rel, "size": st.st_size, "time": st.st_mtime,
+                    "kind": _kind_of(p.name),
+                    # 子目录名（如 bilibili / douyin），供界面分组展示去向
+                    "group": rel.split("/")[0] if "/" in rel else "",
                 })
     return jsonify({"outdir": str(data), "files": files})
 
 
 def _safe_file_path() -> Path | None:
-    path = Path(str(request.args.get("path") or "")).resolve()
+    # 路径来源：GET 走查询参数（/api/file?path=…），POST 走 JSON body（/api/reveal 等）。
+    raw = request.args.get("path")
+    if not raw:
+        body = request.get_json(silent=True) or {}
+        raw = body.get("path")
+    if not raw:
+        return None
+    try:
+        path = Path(str(raw)).resolve()
+    except (OSError, ValueError):
+        return None
     root = _current_outdir().resolve()
     if not path.exists() or not path.is_file() or root not in path.parents:
         return None
@@ -417,6 +447,41 @@ def api_download():
     if not path:
         return jsonify({"error": "文件不存在"}), 404
     return send_file(path, as_attachment=True, download_name=path.name, conditional=True)
+
+
+@app.post("/api/reveal")
+def api_reveal():
+    """PC 端「打开所在文件夹」：在资源管理器 / 文件管理器里定位到该文件。仅本机可用。"""
+    if not _is_local():
+        return jsonify({"error": "只允许本机调用"}), 403
+    path = _safe_file_path()
+    if not path:
+        return jsonify({"error": "文件不存在"}), 404
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path.parent)])
+    except Exception as exc:                          # noqa: BLE001
+        return jsonify({"error": _friendly_error(exc, "无法打开文件夹")}), 500
+    return jsonify({"ok": True})
+
+
+@app.post("/api/delete-file")
+def api_delete_file():
+    """删除已下载的文件（含对应缩略图）。仅本机可用，仅限下载目录内。"""
+    if not _is_local():
+        return jsonify({"error": "只允许本机调用"}), 403
+    path = _safe_file_path()
+    if not path:
+        return jsonify({"error": "文件不存在"}), 404
+    try:
+        path.unlink()
+    except Exception as exc:                          # noqa: BLE001
+        return jsonify({"error": _friendly_error(exc, "删除失败")}), 500
+    return jsonify({"ok": True})
 
 
 # --------------------------------------------------------------------------- #

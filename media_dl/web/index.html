@@ -34,6 +34,15 @@
   </div>
 
   <main>
+    <!-- 首启引导：只在需要时出现（缺 ffmpeg / 首次使用），可一键关闭，不打扰 -->
+    <section class="card hidden" id="guide-card">
+      <div class="card-head">
+        <h2 id="guide-title">开始使用</h2>
+        <button class="btn btn-ghost btn-sm" id="btn-guide-close">知道了</button>
+      </div>
+      <div id="guide-body" class="guide-body"></div>
+    </section>
+
     <section class="card" id="input-card">
       <div class="card-head">
         <h2>粘贴链接</h2>
@@ -117,6 +126,18 @@
       </div>
       <div id="jobs-list" class="jobs-list"></div>
     </section>
+
+    <!-- 已下载 / 媒体库：DCIM/随手存 与下载目录里的内容，随时回看、重新保存 -->
+    <section class="card hidden" id="library-card">
+      <div class="card-head">
+        <h2>已下载</h2>
+        <div class="row">
+          <span class="badge" id="library-summary"></span>
+          <button class="btn btn-ghost btn-sm" id="btn-refresh-library">刷新</button>
+        </div>
+      </div>
+      <div id="library-list" class="library-list"></div>
+    </section>
   </main>
 
   <div class="status" id="status">已就绪 · 粘贴链接后点下方按钮</div>
@@ -127,6 +148,7 @@
   <div class="tools">
     <button class="btn btn-ghost btn-sm" id="btn-paste">粘贴</button>
     <button class="btn btn-ghost btn-sm" id="btn-clear">清空</button>
+    <button class="btn btn-ghost btn-sm" id="btn-library">已下载</button>
     <span class="grow"></span>
     <span class="nw" id="wm-chip">去水印 · 免 Cookie</span>
   </div>

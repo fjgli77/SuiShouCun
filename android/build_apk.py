@@ -383,7 +383,8 @@ def main() -> int:
     classes = BUILD / "classes"
     classes.mkdir(parents=True)
     java_src = HERE / "java" / "com" / "suishoucun" / "app"
-    java_files = [str(java_src / "MainActivity.java"), str(java_src / "PyService.java")]
+    java_files = [str(java_src / "MainActivity.java"), str(java_src / "PyService.java"),
+                  str(java_src / "DownloadService.java")]
     run([javac, "--release", "8", "-encoding", "UTF-8", "-Xlint:-options",
          "-cp", str(android_jar), "-d", str(classes)] + java_files,
         "javac 编译 Java 源码")

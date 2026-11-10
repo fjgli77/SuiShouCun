@@ -1000,6 +1000,107 @@ def test_v6(client, base: str, outdir: Path) -> None:
           "err-details" in css and "<details" in js and "技术细节：" in js,
           "")
 
+    # ---- 9. 媒体库 / 历史接线（IT B-1）----
+    check("服务端提供已下载文件列表",
+          "/api/files" in server_src and "_kind_of" in server_src
+          and '"group"' in server_src,
+          "")
+    check("服务端提供「打开文件夹」与删除接口（仅本机）",
+          "/api/reveal" in server_src and "/api/delete-file" in server_src
+          and "只允许本机调用" in server_src,
+          "")
+    check("页面含已下载（媒体库）卡片与入口",
+          "library-card" in page and "library-list" in page
+          and "btn-library" in page and "btn-refresh-library" in page,
+          "")
+    check("前端渲染媒体库并支持再次保存 / 定位",
+          "renderLibrary" in js and "refreshLibrary" in js
+          and "/api/reveal" in js and "lib-again" in js,
+          "")
+    check("媒体库样式定义（含移动端）",
+          ".library-list" in css and ".lib-item" in css and ".lib-ico" in css,
+          "")
+
+    # ---- 10. 首启依赖引导（IT B-2）----
+    check("首启引导卡片存在且只在需要时出现",
+          "guide-card" in page and "guide-body" in page and "btn-guide-close" in page,
+          "")
+    check("引导读取 ffmpeg 状态并说明去向",
+          "renderGuide" in js and "CFG.ffmpeg" in js
+          and "ffmpeg" in js and "不上传" in js,
+          "")
+    check("引导用 localStorage 记住已读，不反复打扰",
+          "GUIDE_SEEN_KEY" in js and "markGuideSeen" in js and "guideSeen" in js,
+          "")
+
+    # ---- 11. 移动端前台服务保活（IT B-3）----
+    download_svc = Path("android/java/com/suishoucun/app/DownloadService.java").read_text(encoding="utf-8")
+    check("清单声明下载前台服务与必要权限",
+          "FOREGROUND_SERVICE" in manifest and "FOREGROUND_SERVICE_DATA_SYNC" in manifest
+          and "POST_NOTIFICATIONS" in manifest
+          and 'android:name=".DownloadService"' in manifest
+          and 'android:foregroundServiceType="dataSync"' in manifest,
+          "")
+    check("前台服务实现通知栏进度与取消入口",
+          "startForeground" in download_svc and "NotificationChannel" in download_svc
+          and "cancelAllRequested" in download_svc and "ACTION_CANCEL_ALL" in download_svc,
+          "")
+    check("下载开始 / 更新 / 结束接入前台服务",
+          "DownloadService.update" in java and "DownloadService.stop" in java
+          and "activeDownloads" in java,
+          "")
+    check("下载循环同时响应通知栏取消",
+          "DownloadService.cancelAllRequested.get()" in java,
+          "")
+    check("通知权限运行时申请（Android 13+）",
+          "requestNotificationPermission" in java and "POST_NOTIFICATIONS" in java,
+          "")
+    check("构建脚本纳入前台服务源码",
+          "DownloadService.java" in apk_src,
+          "")
+
+    # ---- 12. 移动端媒体库（相册列举）----
+    check("原生桥提供相册媒体列举",
+          "listDownloads" in java and "collectMedia" in java
+          and "MediaStore.MediaColumns" in java,
+          "")
+    check("前端移动端改从原生读取已保存文件",
+          "BRIDGE.listDownloads" in js and "JSON.parse(raw" in js,
+          "")
+
+    # ---- 13. Cookie 加密存储（IT B-4）----
+    secure_src = Path("media_dl/secure_store.py").read_text(encoding="utf-8")
+    check("敏感数据落盘加密模块存在且不依赖第三方库",
+          "def encrypt" in secure_src and "def decrypt" in secure_src
+          and "CryptProtectData" in secure_src and "import base64" in secure_src,
+          "")
+    check("加密封装兼容旧版明文（升级不丢 Cookie）",
+          "def decrypt" in secure_src and "return (stored or \"\").strip()" in secure_src,
+          "")
+    check("服务端 Cookie 读写改走加密存储",
+          "secure_store.read_secret" in server_src
+          and "secure_store.write_secret" in server_src
+          and "_COOKIE_STORE.write_text" not in server_src,
+          "")
+    check("配置接口如实暴露加密后端",
+          '"secure_store"' in server_src and "secure_store.backend()" in server_src,
+          "")
+
+    # 加密模块行为自测（往返 + 落盘无明文 + 旧格式兼容）
+    import tempfile as _tf
+    from media_dl import secure_store as _ss
+    _t = Path(_tf.mkdtemp(prefix="mdl_secure_")) / "s.txt"
+    _secret = "sessionid=ABC123secret; uid=42"
+    _ss.write_secret(_t, _secret)
+    _disk = _t.read_text(encoding="utf-8")
+    check("加密后落盘不含明文且可还原",
+          _secret not in _disk and _ss.read_secret(_t) == _secret,
+          f"head={_disk.splitlines()[0]}")
+    _t.write_text("sessionid=LEGACY", encoding="utf-8")
+    check("旧版明文文件仍可读取",
+          _ss.read_secret(_t) == "sessionid=LEGACY",
+          "")
+
 
 def main() -> int:
     server, port = start_local_server()

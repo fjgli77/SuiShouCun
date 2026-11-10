@@ -425,7 +425,10 @@
           });
         }
         PC_JOBS.delete(jid);
-        if (job.status === "done") toast("下载任务已结束");
+        if (job.status === "done") {
+          toast("下载任务已结束");
+          if (!$("library-card").classList.contains("hidden")) refreshLibrary(false);
+        }
         return;
       }
       pollPcJob(jid);
@@ -509,6 +512,7 @@
         downloaded: t.total || t.downloaded, total: t.total || t.downloaded });
       setStatus("已保存到手机相册（DCIM/随手存）：" + filename);
       toast("保存完成：" + filename);
+      if (!$("library-card").classList.contains("hidden")) refreshLibrary(false);
       return;
     }
     if (state === "cancelled") {
@@ -808,6 +812,165 @@
     if (IS_APK && $("btn-dy-login")) $("btn-dy-login").style.display = "";
   }
 
+  // ------------------------------------------------------------------ //
+  // 首启引导：只在「首次使用」或「缺 ffmpeg」时出现，可一键关闭且记住选择。
+  // 目的：把「全程本机、不上传」说清楚，并如实告知缺 ffmpeg 的影响。
+  // ------------------------------------------------------------------ //
+  const GUIDE_SEEN_KEY = "media_dl_guide_seen";
+
+  function guideSeen() {
+    try { return localStorage.getItem(GUIDE_SEEN_KEY) === "1"; } catch (e) { return false; }
+  }
+  function markGuideSeen() {
+    try { localStorage.setItem(GUIDE_SEEN_KEY, "1"); } catch (e) { /* ignore */ }
+  }
+
+  function renderGuide() {
+    const card = $("guide-card");
+    if (!card) return;
+    const needFfmpeg = CFG && CFG.ffmpeg === false;
+    // 已引导过，且系统不缺 ffmpeg → 不再打扰
+    if (guideSeen() && !needFfmpeg) { card.classList.add("hidden"); return; }
+
+    const rows = [];
+    rows.push('<p>把链接粘进输入框（或直接点「粘贴」），勾选需要的选项，点「下载」即可。' +
+      (NATIVE ? "文件会直接存进手机相册（DCIM/随手存）。" : "文件会由浏览器保存到本机。") + "</p>");
+    rows.push('<div class="guide-row"><span class="guide-ico">🔒</span><span>' +
+      '<strong>全程本机、不上传。</strong>解析与下载都在你这台设备上完成，' +
+      '没有账号、没有服务器、没有云端同步；登录态 Cookie 只发往对应平台，' +
+      (CFG && CFG.secure_store === "dpapi"
+        ? "并以系统级加密（DPAPI，绑定当前电脑用户）保存在本机。"
+        : "且只保存在应用私有目录内。") +
+      "</span></div>");
+    if (needFfmpeg) {
+      rows.push('<div class="guide-row"><span class="guide-ico">⚠️</span><span>' +
+        '<span class="warn-flag">未检测到 ffmpeg。</span>不影响绝大多数下载，但以下能力会受限：' +
+        '<ul><li>高画质视频的「音视频分轨」可能无法自动合轨，个别站点会退回较低清晰度；</li>' +
+        '<li>仅下载音频（mp3）等需要转码的功能不可用。</li></ul>' +
+        "如需完整能力：PC 端安装 ffmpeg 并加入 PATH 后重启随手存即可。" +
+        (NATIVE ? "（手机端为内嵌环境，通常无需也不便自行安装。）" : "") +
+        "</span></div>");
+    } else if (NATIVE) {
+      rows.push('<p class="guide-note">提示：从抖音 / 相册 / 浏览器「分享」到随手存，可免去复制粘贴，一步带入链接。</p>');
+    }
+    $("guide-title").textContent = needFfmpeg ? "开始使用 · 环境提示" : "开始使用";
+    $("guide-body").innerHTML = rows.join("");
+    card.classList.remove("hidden");
+  }
+
+  function closeGuide() {
+    markGuideSeen();
+    $("guide-card").classList.add("hidden");
+  }
+
+  // ------------------------------------------------------------------ //
+  // 媒体库（已下载）：读取 /api/files，展示去向与体积，支持再次保存 / 打开文件夹
+  //   - PC：打开所在文件夹 / 再次下载
+  //   - 移动端：Java 原生写入相册，这里提示「在系统相册查看」，并可再次下载
+  // ------------------------------------------------------------------ //
+  let LIBRARY = [];
+
+  function fmtTime(sec) {
+    if (!sec) return "";
+    const d = new Date(sec * 1000);
+    const p = (n) => String(n).padStart(2, "0");
+    return (d.getMonth() + 1) + "/" + d.getDate() + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+
+  function libIcon(kind) {
+    return kind === "video" ? "🎬" : kind === "image" ? "🖼" : kind === "audio" ? "🎵" : "📄";
+  }
+
+  function renderLibrary() {
+    const card = $("library-card");
+    if (!card) return;
+    if (!LIBRARY.length) { card.classList.add("hidden"); return; }
+    card.classList.remove("hidden");
+    $("library-summary").textContent = LIBRARY.length + " 个文件";
+    $("library-list").innerHTML = LIBRARY.map((f, i) => {
+      const dest = NATIVE ? "已存到相册（DCIM/随手存）" : (f.group || "下载目录");
+      // 移动端文件已在系统相册里，条目仅作回看；PC 端可从下载目录再次保存 / 定位
+      const actions = NATIVE ? "" :
+        '<div class="lib-actions">' +
+          '<button class="btn btn-sm lib-reveal" data-i="' + i + '">打开文件夹</button>' +
+          '<button class="btn btn-sm btn-primary lib-again" data-i="' + i + '">再次保存</button>' +
+        "</div>";
+      return '<div class="lib-item">' +
+        '<div class="lib-ico ' + escapeHtml(f.kind || "other") + '">' + libIcon(f.kind) + "</div>" +
+        '<div class="lib-info"><div class="lib-name">' + escapeHtml(f.name) + "</div>" +
+          '<div class="lib-meta"><span>' + escapeHtml(dest) + "</span><span>" +
+          fmtBytes(f.size) + "</span><span>" + fmtTime(f.time) + "</span></div></div>" +
+        actions + "</div>";
+    }).join("");
+
+    Array.prototype.forEach.call(document.querySelectorAll(".lib-reveal"), (b) => {
+      b.addEventListener("click", () => {
+        const f = LIBRARY[parseInt(b.dataset.i, 10)];
+        if (!f) return;
+        api("/api/reveal", { method: "POST", body: JSON.stringify({ path: f.path }) })
+          .then(() => toast("已在文件夹中定位"))
+          .catch((e) => toast("打开文件夹失败：" + e.message));
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".lib-again"), (b) => {
+      b.addEventListener("click", () => {
+        const f = LIBRARY[parseInt(b.dataset.i, 10)];
+        if (!f) return;
+        const url = apiUrl("/api/file?path=" + encodeURIComponent(f.path));
+        if (NATIVE) {
+          const taskId = "l" + Date.now() + "_" + parseInt(b.dataset.i, 10);
+          try {
+            if (BRIDGE.download(url, f.name, taskId) === false) { toast("保存失败，请重试"); return; }
+            upsertTask(taskId, { title: f.name, status: "downloading" });
+          } catch (e) { toast("调用本地下载失败：" + e.message); }
+        } else {
+          const a = document.createElement("a");
+          a.href = apiUrl("/api/download?path=" + encodeURIComponent(f.path));
+          a.rel = "noopener"; a.style.display = "none";
+          document.body.appendChild(a); a.click();
+          setTimeout(() => { if (a.parentNode) document.body.removeChild(a); }, 1500);
+        }
+      });
+    });
+  }
+
+  async function refreshLibrary(showToast) {
+    // 移动端：文件由 Java 原生写入相册，不在 Python 下载目录里，改从原生列举。
+    if (NATIVE && BRIDGE && typeof BRIDGE.listDownloads === "function") {
+      try {
+        const raw = BRIDGE.listDownloads();
+        LIBRARY = JSON.parse(raw || "[]");
+        LIBRARY.forEach((f) => { f.path = ""; f.group = ""; });
+        renderLibrary();
+        if (showToast) toast(LIBRARY.length ? ("已加载 " + LIBRARY.length + " 个已保存文件") : "还没有已保存的文件");
+      } catch (e) {
+        if (showToast) toast("读取失败");
+      }
+      return;
+    }
+    try {
+      const data = await api("/api/files");
+      LIBRARY = data.files || [];
+      renderLibrary();
+      if (showToast) toast(LIBRARY.length ? ("已加载 " + LIBRARY.length + " 个已下载文件") : "还没有已下载的文件");
+    } catch (e) {
+      if (showToast) toast("读取失败：" + e.message);
+    }
+  }
+
+  function toggleLibrary() {
+    const card = $("library-card");
+    if (!card.classList.contains("hidden")) {
+      card.classList.add("hidden");
+      return;
+    }
+    refreshLibrary(true).then(() => {
+      if (LIBRARY.length) {
+        try { card.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { /* ignore */ }
+      }
+    });
+  }
+
   async function boot() {
     try {
       CFG = await api("/api/config");
@@ -816,6 +979,7 @@
       applyClientUi();
       updateCount();
       runDetect();
+      renderGuide();
       setStatus(NATIVE ? "已就绪 · 粘贴链接后点下方按钮，文件直接保存到手机本地"
                        : "已就绪 · 粘贴链接后点下方按钮");
     } catch (e) {
@@ -824,8 +988,7 @@
       $("state-pill").className = "pill warn";
       setStatus("连不上本机服务：" + e.message);
       toast("无法连接本机服务：" + e.message);
-    }
-    // APP 内登录获取的抖音登录态：自动填充并提示，避免手动复制；首次还会自动静默探测
+    }    // APP 内登录获取的抖音登录态：自动填充并提示，避免手动复制；首次还会自动静默探测
     if (IS_APK) {
       refreshCookieStatus().then(() => maybeAutoOpenLogin());
       // 拉取冷启动时 Java 端攒下的分享链接（push 通道的兜底）
@@ -892,6 +1055,9 @@
   $("btn-download-all").addEventListener("click", downloadAll);
   $("btn-clear-jobs").addEventListener("click", clearFinishedTasks);
   $("btn-paste").addEventListener("click", pasteFromClipboard);
+  if ($("btn-library")) $("btn-library").addEventListener("click", toggleLibrary);
+  if ($("btn-refresh-library")) $("btn-refresh-library").addEventListener("click", () => refreshLibrary(true));
+  if ($("btn-guide-close")) $("btn-guide-close").addEventListener("click", closeGuide);
   $("btn-clear").addEventListener("click", () => {
     $("input").value = ""; updateCount(); renderDetect([]);
     $("result-card").classList.add("hidden"); LAST_ITEMS = [];

@@ -241,6 +241,35 @@ body.is-mobile .cookie-field textarea { background: rgba(0,0,0,.18); }
 .job-bar.indet > i { width: 38%; animation: jobslide 1.1s linear infinite; }
 @keyframes jobslide { from { margin-left: -38%; } to { margin-left: 100%; } }
 
+/* 首启引导卡片 */
+.guide-body { font-size: 13px; line-height: 1.75; color: var(--text); }
+.guide-body p { margin: 0 0 8px; }
+.guide-body .guide-row { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; }
+.guide-body .guide-ico { flex: none; width: 20px; text-align: center; }
+.guide-body ul { margin: 6px 0 8px; padding-left: 20px; }
+.guide-body li { margin: 3px 0; }
+.guide-body code {
+  font-family: Consolas, monospace; font-size: 12px; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px;
+}
+.guide-note { color: var(--muted); font-size: 12px; }
+.guide-body .warn-flag { color: var(--amber); font-weight: 560; }
+
+/* 媒体库（已下载） */
+.library-list { display: grid; gap: 9px; }
+.lib-item { border: 1px solid var(--border); border-radius: 11px; padding: 11px 13px; background: var(--surface-2);
+  display: flex; align-items: center; gap: 12px; }
+.lib-ico { flex: none; width: 42px; height: 42px; border-radius: 10px; display: flex;
+  align-items: center; justify-content: center; font-size: 20px; background: var(--primary-soft); }
+.lib-ico.video { background: #e7f0ff; }
+.lib-ico.image { background: var(--green-soft); }
+.lib-ico.audio { background: #f0edff; }
+.lib-info { flex: 1; min-width: 0; }
+.lib-name { font-size: 13px; font-weight: 520; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-meta { margin-top: 4px; font-size: 11.5px; color: var(--muted);
+  font-family: Consolas, monospace; display: flex; gap: 10px; flex-wrap: wrap; }
+.lib-actions { flex: none; display: flex; gap: 6px; }
+
 /* 操作栏（PC 上是普通块） */
 .action-bar { max-width: 1000px; margin: 0 auto 8px; padding: 0 22px; }
 .tools { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
@@ -420,6 +449,14 @@ body.is-mobile .ri-actions .btn { flex: 1; }
 body.is-mobile .job-item { border-radius: 16px; padding: 14px; }
 body.is-mobile .job-bar { height: 8px; }
 body.is-mobile .job-cancel { min-height: 34px; padding: 4px 14px; font-size: 12.5px; }
+/* 媒体库：移动端整行更宽松，文件名最多两行 */
+body.is-mobile .lib-item { border-radius: 16px; padding: 12px; }
+body.is-mobile .lib-name { white-space: normal; word-break: break-word; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; }
+body.is-mobile .lib-ico { background: rgba(53, 224, 176, .14); }
+body.is-mobile .lib-ico.video { background: rgba(90, 160, 255, .16); }
+body.is-mobile .lib-ico.image { background: rgba(53, 224, 176, .14); }
+body.is-mobile .lib-actions .btn { min-height: 38px; }
 body.is-mobile .detect-chip { background: rgba(255,255,255,.06); border-radius: 999px; }
 body.is-mobile .detect-chip .du { max-width: 150px; }
 body.is-mobile .err-line.warn { color: var(--amber); }
