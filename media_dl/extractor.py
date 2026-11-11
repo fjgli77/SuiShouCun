@@ -122,6 +122,10 @@ def _parse_link_impl(link: Link, options: DownloadOptions | None = None) -> Pars
         entries = _parse_with_ytdlp(link, opts)
         if entries:
             result.entries = entries
+            # 合集元信息由 _parse_with_ytdlp 登记在 _COLLECTION_META，这里取走
+            meta = _COLLECTION_META.pop(link.url, None)
+            if meta:
+                result.collection = dict(meta)
             return result
     except Exception as exc:                       # noqa: BLE001 - 需要兜底到页面提取
         result.warnings.append(f"备用解析器未识别：{_friendly(exc)}")
@@ -409,6 +413,9 @@ def _bilibili_bangumi(link: Link, opts: DownloadOptions) -> tuple[MediaEntry | N
 # --------------------------------------------------------------------------- #
 # yt-dlp
 # --------------------------------------------------------------------------- #
+# 合集 / 系列元信息登记表：_parse_with_ytdlp 写入，parse_text 取走（一次性）
+_COLLECTION_META: dict[str, dict[str, Any]] = {}
+
 def _parse_with_ytdlp(link: Link, opts: DownloadOptions) -> list[MediaEntry]:
     import yt_dlp
 
@@ -459,6 +466,10 @@ def _parse_with_ytdlp(link: Link, opts: DownloadOptions) -> list[MediaEntry]:
         title = playlist_title or safe_filename(str(raw_entries[0].get("title") or "gallery"))
         result.append(_gallery_entry(link, unique, title, opts))
     result.extend(video_entries)
+    # 多条视频且标题来自播放列表（而非单视频页）→ 属于合集 / 系列
+    _videos = [e for e in result if e.kind == "video"]
+    if len(_videos) > 1 and playlist_title:
+        _COLLECTION_META[link.url] = {"title": playlist_title, "count": len(_videos)}
     return result
 
 

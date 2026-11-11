@@ -39,6 +39,90 @@
   }
 
   function setStatus(msg) { $("status").textContent = msg; }
+
+  // ------------------------------------------------------------------ //
+  // PC 桌面通知：任务结束（完成 / 失败 / 取消）时提醒。
+  //   仅在页面处于后台（document.hidden）时打扰，前台用户已能看到任务卡；
+  //   权限在用户首次创建任务时惰性申请（不弹在首屏）。
+  // ------------------------------------------------------------------ //
+  const NOTIFY_KEY = "media_dl_notify";   // "1" 开启 / "0" 关闭 / 缺省 = 开启
+
+  function notifyEnabled() {
+    if (NATIVE || !("Notification" in window)) return false;
+    try { return localStorage.getItem(NOTIFY_KEY) !== "0"; } catch (e) { return true; }
+  }
+
+  /** 惰性申请通知权限：失败 / 拒绝都静默，不影响主流程。 */
+  function ensureNotifyPermission() {
+    if (!notifyEnabled() || Notification.permission !== "default") return;
+    try { Notification.requestPermission().catch(() => {}); } catch (e) { /* 忽略 */ }
+  }
+
+  function notifyDesktop(title, body) {
+    if (!notifyEnabled() || !document.hidden || Notification.permission !== "granted") return;
+    try {
+      const n = new Notification(title, { body, tag: "media-dl-job", silent: false });
+      n.onclick = () => { window.focus(); n.close(); };
+      setTimeout(() => n.close(), 6000);
+    } catch (e) { /* 部分环境构造即抛错，忽略 */ }
+  }
+
+  // 通知开关放在头部主题按钮旁（移动端无通知能力，直接隐藏）
+  function initNotifyToggle() {
+    const btn = $("btn-notify");
+    if (!btn) return;
+    btn.style.display = notifyEnabled() || "Notification" in window ? "" : "none";
+    if (NATIVE) { btn.style.display = "none"; return; }
+    const paint = () => { btn.textContent = notifyEnabled() ? "🔔" : "🔕"; };
+    paint();
+    btn.addEventListener("click", () => {
+      const on = notifyEnabled();
+      try { localStorage.setItem(NOTIFY_KEY, on ? "0" : "1"); } catch (e) { /* 忽略 */ }
+      paint();
+      if (!on) ensureNotifyPermission();   // 刚打开：补申请权限
+      toast(on ? "桌面通知已关闭" : "桌面通知已开启（任务结束后提醒）");
+    });
+  }
+
+  // ------------------------------------------------------------------ //
+  // 深浅色主题（PC 端）：默认跟随系统，点 🌙/☀️ 手动切换并记住。
+  //   移动端本来就是深色视觉（body.is-mobile），不参与本开关。
+  // ------------------------------------------------------------------ //
+  const THEME_KEY = "media_dl_theme";   // "auto" | "light" | "dark"
+  const mqDark = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
+  function systemDark() { return !!(mqDark && mqDark.matches); }
+  function themePref() {
+    try { return localStorage.getItem(THEME_KEY) || "auto"; } catch (e) { return "auto"; }
+  }
+
+  /** 计算并落主题：auto → 跟随系统；light/dark → 手动指定。 */
+  function applyTheme() {
+    if (MOBILE) { document.body.classList.remove("theme-dark"); return; }
+    const pref = themePref();
+    const dark = pref === "dark" || (pref === "auto" && systemDark());
+    document.body.classList.toggle("theme-dark", dark);
+    const btn = $("btn-theme");
+    if (btn) {
+      btn.textContent = dark ? "☀️" : "🌙";
+      btn.title = dark ? "切换到浅色模式" : "切换到深色模式";
+    }
+  }
+
+  function toggleTheme() {
+    // 在「亮 ↔ 暗」之间切换，并把结果存为显式偏好（不再是 auto）
+    const dark = document.body.classList.contains("theme-dark");
+    try { localStorage.setItem(THEME_KEY, dark ? "light" : "dark"); } catch (e) { /* 忽略 */ }
+    applyTheme();
+    toast(document.body.classList.contains("theme-dark") ? "已切换到深色模式" : "已切换到浅色模式");
+  }
+
+  // 跟随系统的前提下，系统切换深浅色时实时响应（仅 auto 模式）
+  if (mqDark) {
+    const onSysTheme = () => { if (themePref() === "auto") applyTheme(); };
+    if (mqDark.addEventListener) mqDark.addEventListener("change", onSysTheme);
+    else if (mqDark.addListener) mqDark.addListener(onSysTheme);   // 旧 WebView 兼容
+  }
   function apiUrl(path) { return location.origin + path; }
 
   async function api(path, options) {
@@ -411,6 +495,7 @@
 
   /** PC 端：把一批链接交给后端后台任务下载，前端轮询进度。 */
   async function startPcJob(text) {
+    ensureNotifyPermission();   // 首次创建任务时惰性申请通知权限
     let data;
     try {
       data = await api("/api/jobs", { method: "POST", body: JSON.stringify({ text: text, options: collectOptions() }) });
@@ -489,7 +574,12 @@
         PC_JOBS.delete(jid);
         if (job.status === "done") {
           toast("下载任务已结束");
+          notifyDesktop("下载完成",
+            (job.cards && Object.keys(job.cards).length || 1) + " 项已下载到本地");
           if (libraryOpen()) refreshLibrary(false);
+        } else if (job.status === "error") {
+          notifyDesktop("下载任务失败",
+            (job.errors && job.errors[0] || "请回到页面查看原因").slice(0, 90));
         }
         return;
       }
@@ -613,6 +703,24 @@
     try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { window.scrollTo(0, 0); }
   }
 
+  /** 合集 / 系列提示条：解析出「同链接多条视频」时展示，一键全部下载。 */
+  function renderCollectionTip(results) {
+    const el = $("collection-tip");
+    if (!el) return;
+    const col = (results || []).find((r) => r.collection && r.collection.count > 1);
+    if (!col) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+    const c = col.collection;
+    el.classList.remove("hidden");
+    el.innerHTML =
+      '<div class="coll-main"><span class="coll-badge">合集</span>' +
+      '<span class="coll-title">' + escapeHtml(c.title) + " · 共 " + c.count + " 个视频</span>" +
+      '<span class="coll-sub">一次全部下载，无需逐个点</span></div>' +
+      '<button class="btn btn-sm btn-primary" id="btn-col-download">' +
+      (NATIVE ? "全部保存到手机" : "全部下载") + "</button>";
+    const btn = $("btn-col-download");
+    if (btn) btn.addEventListener("click", downloadAll);
+  }
+
   function renderErrors(results) {
     const lines = [];
     (results || []).forEach((r) => {
@@ -655,6 +763,7 @@
     $("result-summary").textContent = LAST_ITEMS.length + " 个可下载项";
     $("btn-download-all").textContent = ALL_LABEL;
     renderErrors(results);
+    renderCollectionTip(data.results || []);
 
     if (!LAST_ITEMS.length) {
       $("result-list").innerHTML = '<p class="muted">没有可下载的内容，请查看上方失败原因后调整链接重试。</p>';
@@ -854,6 +963,7 @@
     $("btn-download").textContent = SAVE_LABEL;
     $("btn-download-all").textContent = ALL_LABEL;
     $("btn-preview-download").textContent = NATIVE ? "保存到手机" : "下载此项";
+    applyTheme();   // 端别落定后同步主题（移动端恒深色、PC 跟随偏好）
     // PC 专属功能：退出按钮；移动端隐藏
     const pcOnly = !MOBILE;
     $("btn-exit").style.display = pcOnly ? "" : "none";
@@ -974,6 +1084,53 @@
     return kind === "video" ? "🎬" : kind === "image" ? "🖼" : kind === "audio" ? "🎵" : "📄";
   }
 
+  // ---- 媒体库真实缩略图（仅 PC）：图片直接用 /api/file，视频用 canvas 截首帧 ---- //
+  const THUMB_DONE = new Set();   // 已生成过缩略图的文件路径，避免重复解码
+
+  function thumbFor(f, i) {
+    // 移动端文件在系统相册，本地路径不可读，保持图标形态
+    if (NATIVE || !f.path || THUMB_DONE.has(f.path)) return "";
+    if (f.kind === "image") {
+      THUMB_DONE.add(f.path);
+      return '<img class="lib-thumb" loading="lazy" alt="" src="' +
+        apiUrl("/api/file?path=" + encodeURIComponent(f.path)) +
+        '" onerror="this.remove()">';
+    }
+    if (f.kind === "video") return '<div class="lib-thumb lib-thumb-video" data-vi="' + i + '"></div>';
+    return "";
+  }
+
+  /** 视频→首帧：requestVideoFrameCallback / seeked 双兜底，生成 96px 宽截图。 */
+  function paintVideoThumb(holder, src) {
+    const v = document.createElement("video");
+    v.muted = true; v.preload = "metadata"; v.src = src;
+    const paint = () => {
+      try {
+        const w = 96, ratio = v.videoHeight ? (v.videoHeight / v.videoWidth) : 0.5625;
+        const c = document.createElement("canvas");
+        c.width = w; c.height = Math.round(w * ratio);
+        c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+        holder.innerHTML = "";
+        holder.appendChild(c);
+      } catch (e) { holder.innerHTML = ""; }   // 解码失败回退图标
+    };
+    v.requestVideoFrameCallback
+      ? v.requestVideoFrameCallback(() => { paint(); v.src = ""; })
+      : (v.onseeked = () => { paint(); v.src = ""; });
+    v.onerror = () => { holder.innerHTML = ""; };
+    // 拿到时长后 seek 到 10% 处触发解码（很多格式首帧是黑屏，取 10% 更有信息量）
+    v.onloadedmetadata = () => { try { v.currentTime = Math.min(1, (v.duration || 1) * 0.1); } catch (e) { paint(); } };
+  }
+
+  function attachVideoThumbs(root) {
+    if (NATIVE) return;
+    Array.prototype.forEach.call((root || document).querySelectorAll(".lib-thumb-video"), (h) => {
+      const f = LIBRARY[parseInt(h.dataset.vi, 10)];
+      if (!f || !f.path) return;
+      paintVideoThumb(h, apiUrl("/api/file?path=" + encodeURIComponent(f.path)));
+    });
+  }
+
   function renderLibrary() {
     const card = $("library-card");
     if (!card) return;
@@ -1000,7 +1157,7 @@
           '<button class="btn btn-sm btn-primary lib-again" data-i="' + i + '" aria-label="再次保存该文件">再次保存</button>' +
         "</div>";
       return '<div class="lib-item" role="listitem">' +
-        '<div class="lib-ico ' + escapeHtml(f.kind || "other") + '" aria-hidden="true">' + libIcon(f.kind) + "</div>" +
+        (thumbFor(f, i) || '<div class="lib-ico ' + escapeHtml(f.kind || "other") + '" aria-hidden="true">' + libIcon(f.kind) + "</div>") +
         '<div class="lib-info"><div class="lib-name">' + escapeHtml(f.name) + "</div>" +
           '<div class="lib-meta"><span>' + escapeHtml(dest) + "</span><span>" +
           fmtBytes(f.size) + "</span><span>" + fmtTime(f.time) + "</span></div></div>" +
@@ -1033,6 +1190,7 @@
         }
       });
     });
+    attachVideoThumbs($("library-list"));   // PC：视频条目补首帧缩略图
   }
 
   async function refreshLibrary(showToast) {
@@ -1221,6 +1379,8 @@
   });
   $("btn-download").addEventListener("click", () => parseAndDownload(true));
   $("btn-parse").addEventListener("click", () => parseAndDownload(false));
+  if ($("btn-theme")) $("btn-theme").addEventListener("click", toggleTheme);
+  initNotifyToggle();
   $("btn-download-all").addEventListener("click", downloadAll);
   $("btn-clear-jobs").addEventListener("click", clearFinishedTasks);
   $("btn-paste").addEventListener("click", pasteFromClipboard);

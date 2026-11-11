@@ -62,6 +62,8 @@ class ParseResult:
     entries: list[MediaEntry] = field(default_factory=list)
     error: str = ""
     warnings: list[str] = field(default_factory=list)
+    # 合集 / 系列信息：同一链接解析出多条视频时由解析器填充（如 B 站合集、番剧系列）
+    collection: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -95,6 +97,7 @@ class ParseResult:
             "entries": [e.to_dict() for e in self.entries],
             "error": self.error,
             "warnings": self.warnings,
+            "collection": self.collection,
         }
 
 

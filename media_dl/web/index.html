@@ -27,6 +27,8 @@
       <div class="topbar-right">
         <span class="pill" id="state-pill">连接中</span>
         <span class="pill ok" id="nowm-pill">可去水印</span>
+        <button class="btn btn-ghost btn-sm theme-btn pc-only" id="btn-notify" title="任务结束后桌面提醒开关" aria-label="切换桌面通知">🔔</button>
+        <button class="btn btn-ghost btn-sm theme-btn pc-only" id="btn-theme" title="切换深浅色（跟随系统 + 手动可改）" aria-label="切换深浅色模式">🌙</button>
         <button class="btn btn-ghost btn-sm exit-btn pc-only" id="btn-exit" title="退出随手存电脑端">退出程序</button>
       </div>
     </header>
@@ -121,6 +123,8 @@
         </div>
       </div>
       <div id="result-errors"></div>
+      <!-- 合集 / 系列提示条：同链接解析出多条视频时出现，一键全部下载 -->
+      <div class="collection-tip hidden" id="collection-tip"></div>
       <div id="result-list" class="result-list"></div>
       <p class="tip" id="result-tip"></p>
     </section>

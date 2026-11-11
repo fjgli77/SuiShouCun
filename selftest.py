@@ -547,7 +547,9 @@ def test_unified_ui(client) -> None:
     check("按运行端裁剪功能：PC 专属选项与退出按钮（JS 不再按窗口宽度判断）",
           "pc-only" in page and "btn-exit" in page
           and "is-mobile .pc-only" in css and '!MOBILE' in js
-          and "matchMedia" not in js)
+          # matchMedia 仅允许用于深浅色偏好探测（prefers-color-scheme），
+          # 不得用于按窗口宽度切换布局的旧逻辑
+          and all("prefers-color-scheme" in l for l in js.splitlines() if "matchMedia" in l))
     check("前端不再有扫码 / 口令 / 连接电脑",
           all(x not in page for x in ("qr-modal", "token-card", "btn-conn", "apk-key"))
           and all(x not in js for x in ("X-Access-Token", "apk_key", "X-MediaDL-Key",
