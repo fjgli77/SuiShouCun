@@ -217,6 +217,8 @@ def _download_video(entry: MediaEntry, opts: DownloadOptions, cb: OnProgress) ->
     before = {p.name for p in target_dir.iterdir() if p.is_file()}
 
     ydl_opts = ytdlp_opts(opts, entry.platform, progress_hooks=[hook])
+    # _VIDEO_LOCK 只保护 yt-dlp 全局状态（转码临时文件等）；
+    # 直链下载（_download_direct_video）不走 yt-dlp，不受此锁影响，可真并发。
     with _VIDEO_LOCK:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
@@ -372,6 +374,21 @@ def _stream_to_file(
     if target.exists() and target.stat().st_size > min_size:
         resp.close()
         return target, content_type
+    # 磁盘空间预检：剩余空间须 ≥ 待下载量 + 100MB 余量，不足时报友好错误，
+    # 避免大文件下到一半磁盘满，留下大量 .part 残骸
+    need = max(total - (part_size if resumed else 0), 0) + 100 * 1024 * 1024
+    try:
+        import shutil
+        free = shutil.disk_usage(tmp.parent).free
+        if total and free < need:
+            resp.close()
+            raise RuntimeError(
+                f"磁盘空间不足：剩余 {free / 1024**3:.1f} GB，"
+                f"本文件还需约 {(total - part_size) / 1024**3:.1f} GB，请清理后重试")
+    except RuntimeError:
+        raise
+    except Exception:                                    # noqa: BLE001 - 预检失败不阻断下载
+        pass
     try:
         mode = "ab" if resumed else "wb"
         written_before = part_size if resumed else 0

@@ -50,6 +50,12 @@
       </div>
       <textarea id="input" spellcheck="false" placeholder="示例：&#10;8.87 复制打开抖音，看看【作品】 https://v.douyin.com/xxxx/ 复制此链接&#10;https://www.douyin.com/video/7705524077934562595&#10;https://www.bilibili.com/bangumi/play/ep321808/&#10;https://example.com/photo.jpg"></textarea>
       <div class="detect-list" id="detect-list"></div>
+      <!-- 剪贴板检测条：回到页面时发现新链接才浮出，一键填入；不自动下载 -->
+      <div class="clip-bar hidden" id="clip-bar" role="status">
+        <span class="clip-text">检测到剪贴板中有链接</span>
+        <button class="btn btn-sm" id="btn-clip-fill">一键填入</button>
+        <button class="clip-dismiss" id="btn-clip-dismiss" aria-label="忽略本次检测">✕</button>
+      </div>
     </section>
 
     <section class="card" id="settings-card">

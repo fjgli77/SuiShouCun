@@ -1171,6 +1171,47 @@
     if (!IS_APK && "serviceWorker" in navigator && window.isSecureContext) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
+    initClipboardWatch();
+  }
+
+  // ------------------------------------------------------------------ //
+  // 剪贴板自动检测：回到页面时读一次剪贴板，含新链接才浮出「一键填入」条。
+  // 不自动下载、不打断输入；同一条链接只提示一次（与上次已填内容比对）。
+  // ------------------------------------------------------------------ //
+  let lastClipText = "";        // 上次检测到的剪贴板原文（避免重复提示同一条）
+  let clipDismissed = "";       // 用户点「✕」忽略的文本，本次会话不再提示
+
+  function initClipboardWatch() {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") checkClipboardForLink();
+    });
+    window.addEventListener("focus", () => checkClipboardForLink());
+  }
+
+  async function checkClipboardForLink() {
+    // 输入框已有同样内容 → 无需提示
+    const box = $("input");
+    if (!box || document.activeElement === box) return;
+    let text = "";
+    try {
+      if (BRIDGE && typeof BRIDGE.readClipboard === "function") {
+        text = BRIDGE.readClipboard() || "";
+      } else if (navigator.clipboard && window.isSecureContext) {
+        text = await navigator.clipboard.readText();
+      }
+    } catch (e) { return; }     // 无权限/无内容：静默跳过
+    text = (text || "").trim();
+    if (!text || text === lastClipText || text === clipDismissed) return;
+    // 只对"含链接"的剪贴板提示；与输入框现值相同也不提示
+    if (!/https?:\/\/[^\s<>"']+/i.test(text)) return;
+    if (box.value.trim() === text) { lastClipText = text; return; }
+    lastClipText = text;
+    $("clip-bar").classList.remove("hidden");
+  }
+
+  function dismissClipBar() {
+    clipDismissed = lastClipText;
+    $("clip-bar").classList.add("hidden");
   }
 
   $("input").addEventListener("input", () => {
@@ -1183,6 +1224,13 @@
   $("btn-download-all").addEventListener("click", downloadAll);
   $("btn-clear-jobs").addEventListener("click", clearFinishedTasks);
   $("btn-paste").addEventListener("click", pasteFromClipboard);
+  if ($("btn-clip-fill")) {
+    $("btn-clip-fill").addEventListener("click", () => {
+      $("clip-bar").classList.add("hidden");
+      insertPasted(lastClipText);
+    });
+  }
+  if ($("btn-clip-dismiss")) $("btn-clip-dismiss").addEventListener("click", dismissClipBar);
   if ($("btn-library")) $("btn-library").addEventListener("click", toggleLibrary);
   if ($("library-head")) {
     $("library-head").addEventListener("click", toggleLibraryOpen);
