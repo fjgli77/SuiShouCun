@@ -59,6 +59,15 @@ body.theme-dark .toast { background: #2a3450; }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+/* 禁用 Android WebView 的字体自动放大（font boosting / text autosizing）。
+   WebView 在 width=device-width 页面上会按系统字体设置放大块级控件文字，
+   导致「默认画质 / 最多图片数」下拉框、登录按钮等 white-space:nowrap 控件
+   被撑宽溢出卡片右边框，ffmpeg 警告条换行位置也随之大变。显式声明 100%
+   （含 -webkit- 前缀，Chromium 内核 WebView 必需）即可锁死字号。 */
+html, body {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
 body {
   background: var(--bg);
   color: var(--text);
@@ -493,6 +502,11 @@ body.is-mobile textarea {
 body.is-mobile textarea:focus { background: rgba(0,0,0,.24); box-shadow: 0 0 0 3px rgba(53,224,176,.12); }
 body.is-mobile textarea::placeholder { color: #6d7a99; }
 body.is-mobile .settings { grid-template-columns: 1fr; gap: 12px; }
+/* 防溢出保险：即便个别 WebView 变体仍对文字做放大，网格轨道与控件也不越过卡片边框 */
+body.is-mobile .settings > * { min-width: 0; max-width: 100%; }
+body.is-mobile .dd { max-width: 100%; }
+body.is-mobile .dd-btn { max-width: 100%; }
+body.is-mobile .field { min-width: 0; max-width: 100%; }
 body.is-mobile .field { font-size: 13px; }
 body.is-mobile .field input, body.is-mobile .field select {
   min-height: 44px; font-size: 15px; background: rgba(0,0,0,.2); color: var(--text);
