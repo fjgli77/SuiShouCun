@@ -25,7 +25,8 @@ from typing import Any
 from flask import Flask, Response, jsonify, make_response, request, send_file, send_from_directory
 
 from .delivery import create_ticket, fetch as fetch_browser_download, fetch_thumbnail
-from .downloader import download_entry
+from .downloader import download_entry, _Cancelled  # noqa: F401 - _Cancelled 供任务循环判定取消
+from .extractor import parse_text
 from .extractor import parse_text
 from .links import detect_media
 from .models import Progress
@@ -376,6 +377,7 @@ def api_create_job():
         "cancel": threading.Event(),
     }
     with _LOCK:
+        _cleanup_jobs()
         _JOBS[jid] = job
     threading.Thread(target=_run_job, args=(jid,), daemon=True).start()
     return jsonify({"id": jid})
@@ -411,8 +413,73 @@ def api_cancel_job(jid: str):
         return jsonify({"ok": True})
 
 
+@app.post("/api/jobs/<jid>/retry")
+def api_retry_job(jid: str):
+    """对失败任务的错误条目重试：新建一个任务，只包含失败的条目文本。
+
+    若原任务失败源于整段文本解析（无 entries），则用原文本整体重试。
+    """
+    with _LOCK:
+        job = _JOBS.get(jid)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        if job["status"] not in ("done", "error", "cancelled"):
+            return jsonify({"error": "任务仍在进行中，无法重试"}), 400
+        # 找到失败条目对应的原始链接文本：从原文本按行匹配失败标题所在行
+        failed_titles = {c.get("title", "") for c in job["cards"].values()
+                         if c.get("status") == "error"}
+        retry_text = ""
+        if failed_titles:
+            lines = [ln for ln in job["text"].splitlines() if ln.strip()]
+            hits = [ln for ln in lines
+                    if any(t and t in ln for t in failed_titles)]
+            retry_text = "\n".join(hits)
+        if not retry_text:
+            # 无法定位失败行（如解析整段失败）：整段重试
+            retry_text = job["text"]
+        data = {"text": retry_text, "options": job["options"]}
+    new_jid = uuid.uuid4().hex[:12]
+    opts = DownloadOptions.from_dict(data["options"])
+    new_job: dict[str, Any] = {
+        "id": new_jid, "text": data["text"][:2000], "options": opts.to_dict(),
+        "status": "queued", "cards": {}, "entries": [], "errors": [],
+        "files": [], "logs": [f"重试自任务 {jid}，共 {len(data['text'].splitlines())} 行"],
+        "created": time.time(), "finished": None,
+        "cancel": threading.Event(),
+    }
+    with _LOCK:
+        _cleanup_jobs()
+        _JOBS[new_jid] = new_job
+    threading.Thread(target=_run_job, args=(new_jid,), daemon=True).start()
+    return jsonify({"id": new_jid})
+
+
 _IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
 _VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".ts"}
+
+
+# --------------------------------------------------------------------------- #
+# 任务内存淘汰：长期挂机的桌面端不能让 _JOBS 无限增长
+# --------------------------------------------------------------------------- #
+_FINISHED_JOB_KEEP = 20          # 完成态任务最多保留条数
+_FINISHED_JOB_TTL = 24 * 3600    # 完成态任务最长保留时长（24h）
+
+
+def _cleanup_jobs() -> None:
+    """清理完成态旧任务：超 24h 或超出保留条数的先淘汰（须持 _LOCK 调用）。"""
+    finished = sorted(
+        (j for j in _JOBS.values()
+         if j["status"] in ("done", "error", "cancelled") and j.get("finished")),
+        key=lambda x: x["created"],
+    )
+    now = time.time()
+    doomed = {j["id"] for j in finished
+              if now - j["finished"] > _FINISHED_JOB_TTL}
+    overflow = len(finished) - _FINISHED_JOB_KEEP
+    if overflow > 0:
+        doomed |= {j["id"] for j in finished[:overflow]}
+    for jid in doomed:
+        _JOBS.pop(jid, None)
 _AUDIO_EXT = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg"}
 
 
@@ -588,28 +655,27 @@ def _run_job(jid: str) -> None:
             for w in r.warnings:
                 _log(job, f"提示: {w}")
 
-        for r in parsed:
-            for entry in r.entries:
-                if cancel.is_set():
-                    break
-                try:
-                    on_progress(Progress(entry_id=entry.id, status="pending", title=entry.title))
-                    files = download_entry(entry, opts, on_progress)
-                    with _LOCK:
-                        for f in files:
-                            if f not in job["files"]:
-                                job["files"].append(f)
-                except RuntimeError as exc:
-                    if "取消" not in str(exc):
-                        friendly = _friendly_error(exc, "下载失败，请稍后重试")
-                        _log(job, f"失败 {entry.title}: {exc}")
-                        with _LOCK:
-                            job["errors"].append(f"{entry.title}: {friendly}")
-                            job["cards"][entry.id] = Progress(
-                                entry_id=entry.id, status="error", title=entry.title,
-                                message=friendly).to_dict()
-                    break
-                except Exception as exc:                  # noqa: BLE001
+        all_entries = [e for r in parsed for e in r.entries]
+        # PC 端任务内并发下载（与移动端并发上限一致）；yt-dlp 路径有 _VIDEO_LOCK
+        # 串行保护，直链/图片路径无共享可变状态，cards/errors 均经 _LOCK 写入。
+        max_workers = min(3, max(1, len(all_entries)))
+
+        def _dl_one(entry) -> None:
+            try:
+                on_progress(Progress(entry_id=entry.id, status="pending", title=entry.title))
+                # cancel_event 传入下载器：写块间隙即响应取消，而非等当前文件下完
+                files = download_entry(entry, opts, on_progress, cancel_event=cancel)
+                with _LOCK:
+                    for f in files:
+                        if f not in job["files"]:
+                            job["files"].append(f)
+            except _Cancelled:
+                with _LOCK:
+                    job["cards"][entry.id] = Progress(
+                        entry_id=entry.id, status="cancelled", title=entry.title,
+                        message="已取消（.part 已保留，重试可续传）").to_dict()
+            except RuntimeError as exc:
+                if "取消" not in str(exc):
                     friendly = _friendly_error(exc, "下载失败，请稍后重试")
                     _log(job, f"失败 {entry.title}: {exc}")
                     with _LOCK:
@@ -617,8 +683,25 @@ def _run_job(jid: str) -> None:
                         job["cards"][entry.id] = Progress(
                             entry_id=entry.id, status="error", title=entry.title,
                             message=friendly).to_dict()
+            except Exception as exc:                      # noqa: BLE001
+                friendly = _friendly_error(exc, "下载失败，请稍后重试")
+                _log(job, f"失败 {entry.title}: {exc}")
+                with _LOCK:
+                    job["errors"].append(f"{entry.title}: {friendly}")
+                    job["cards"][entry.id] = Progress(
+                        entry_id=entry.id, status="error", title=entry.title,
+                        message=friendly).to_dict()
+
+        if max_workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            # 提交全部条目，等待完成；取消时下载器内部立即抛出，线程自然退出
+            with ThreadPoolExecutor(max_workers=max_workers,
+                                    thread_name_prefix="mdl-dl") as pool:
+                list(pool.map(_dl_one, all_entries))
             if cancel.is_set():
-                break
+                _log(job, "已取消：并发池已全部停止")
+        else:
+            _dl_one(all_entries[0]) if all_entries else None
 
         with _LOCK:
             job["status"] = "cancelled" if cancel.is_set() else "done"

@@ -27,6 +27,8 @@
       <div class="topbar-right">
         <span class="pill" id="state-pill">连接中</span>
         <span class="pill ok" id="nowm-pill">可去水印</span>
+        <button class="btn btn-ghost btn-sm theme-btn pc-only" id="btn-notify" title="任务结束后桌面提醒开关" aria-label="切换桌面通知">🔔</button>
+        <button class="btn btn-ghost btn-sm theme-btn pc-only" id="btn-theme" title="切换深浅色（跟随系统 + 手动可改）" aria-label="切换深浅色模式">🌙</button>
         <button class="btn btn-ghost btn-sm exit-btn pc-only" id="btn-exit" title="退出随手存电脑端">退出程序</button>
       </div>
     </header>
@@ -50,6 +52,12 @@
       </div>
       <textarea id="input" spellcheck="false" placeholder="示例：&#10;8.87 复制打开抖音，看看【作品】 https://v.douyin.com/xxxx/ 复制此链接&#10;https://www.douyin.com/video/7705524077934562595&#10;https://www.bilibili.com/bangumi/play/ep321808/&#10;https://example.com/photo.jpg"></textarea>
       <div class="detect-list" id="detect-list"></div>
+      <!-- 剪贴板检测条：回到页面时发现新链接才浮出，一键填入；不自动下载 -->
+      <div class="clip-bar hidden" id="clip-bar" role="status">
+        <span class="clip-text">检测到剪贴板中有链接</span>
+        <button class="btn btn-sm" id="btn-clip-fill">一键填入</button>
+        <button class="clip-dismiss" id="btn-clip-dismiss" aria-label="忽略本次检测">✕</button>
+      </div>
     </section>
 
     <section class="card" id="settings-card">
@@ -115,6 +123,8 @@
         </div>
       </div>
       <div id="result-errors"></div>
+      <!-- 合集 / 系列提示条：同链接解析出多条视频时出现，一键全部下载 -->
+      <div class="collection-tip hidden" id="collection-tip"></div>
       <div id="result-list" class="result-list"></div>
       <p class="tip" id="result-tip"></p>
     </section>
