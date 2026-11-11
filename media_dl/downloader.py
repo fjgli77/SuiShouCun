@@ -73,22 +73,27 @@ def download_entry(
     entry: MediaEntry,
     options: DownloadOptions | None = None,
     on_progress: OnProgress | None = None,
+    cancel_event: "threading.Event | None" = None,
 ) -> list[str]:
     opts = (options or DownloadOptions()).normalized()
     cb = on_progress or noop
     if entry.raw.get("direct_video_url"):
-        return _download_direct_video(entry, opts, cb)
+        return _download_direct_video(entry, opts, cb, cancel_event)
     if entry.kind in ("image", "gallery") and entry.images:
-        return _download_images(entry, opts, cb)
+        return _download_images(entry, opts, cb, cancel_event)
     return _download_video(entry, opts, cb)
 
 
-def _download_direct_video(entry: MediaEntry, opts: DownloadOptions, cb: OnProgress) -> list[str]:
+def _download_direct_video(
+    entry: MediaEntry, opts: DownloadOptions, cb: OnProgress,
+    cancel_event: "threading.Event | None" = None,
+) -> list[str]:
     """抖音 / 快手：已拿到媒体直链，带 Referer 流式下载。
 
     解析器会给出多个 CDN 节点与画质候选，某个节点失败时自动切换下一个，
     避免单条直链失效就让整个任务失败。
     """
+    quality_tag = f"_{opts.quality}p" if str(opts.quality).isdigit() else ""
     base_urls = [str(u) for u in (entry.raw.get("video_urls") or []) if u]
     # 画质增强：设置了具体「画质上限」时，优先挑选最符合的直链，其余作为 CDN 兜底
     chosen = select_quality_url(entry.raw, opts.quality)
@@ -104,7 +109,8 @@ def _download_direct_video(entry: MediaEntry, opts: DownloadOptions, cb: OnProgr
     urls = base_urls or [primary]
     folder = opts.outdir / (entry.platform if entry.platform != "generic" else "other")
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"{safe_filename(entry.title or 'video', 70)}_{entry.id}.mp4"
+    # 文件名带画质档位：换画质重下时是新文件，不会静默拿到旧画质的已存在文件
+    target = folder / f"{safe_filename(entry.title or 'video', 70)}_{entry.id}{quality_tag}.mp4"
     session = _resource_session(entry, opts)
     session.headers.update({"Referer": str(entry.raw.get("referer") or entry.url)})
 
@@ -113,17 +119,18 @@ def _download_direct_video(entry: MediaEntry, opts: DownloadOptions, cb: OnProgr
     def on_start(total: int, _ctype: str) -> None:
         state["total"] = total
 
-    def on_chunk(size: int) -> None:
-        state["done"] += size
+    def on_chunk(size: int, written: int, total: int) -> None:
+        state["done"] = written
+        state["total"] = total
         now = time.time()
-        if now - state["last"] < 0.15 and state["done"] < state["total"]:
+        if now - state["last"] < 0.15 and written < total:
             return
         state["last"] = now
         cb(Progress(
             entry_id=entry.id, status="downloading", title=entry.title,
-            percent=(state["done"] / state["total"] * 100) if state["total"] else 0.0,
-            downloaded=state["done"], total=state["total"],
-            message="正在下载视频",
+            percent=(written / total * 100) if total else 0.0,
+            downloaded=written, total=total,
+            message="正在下载视频（已续传）" if written > size else "正在下载视频",
         ))
 
     path: Path | None = None
@@ -135,11 +142,18 @@ def _download_direct_video(entry: MediaEntry, opts: DownloadOptions, cb: OnProgr
                 path, _ = _stream_to_file(
                     session, url, target, min_size=1024,
                     on_start=on_start, on_chunk=on_chunk,
+                    cancel_event=cancel_event,
                 )
                 break
+            except _Cancelled:
+                # 取消：保留 .part 供下次续传，直接向上抛
+                raise
             except Exception as exc:                  # noqa: BLE001 - 切换备用直链
                 last_error = exc
-                target.with_name(target.name + ".part").unlink(missing_ok=True)
+                # 仅当不是可续传的中断（如网络闪断）时清 .part；
+                # 网络类错误保留 .part，下次重试可续传
+                if not _is_network_error(exc):
+                    target.with_name(target.name + ".part").unlink(missing_ok=True)
                 if index < len(urls):
                     cb(Progress(
                         entry_id=entry.id, status="downloading", title=entry.title,
@@ -156,6 +170,14 @@ def _download_direct_video(entry: MediaEntry, opts: DownloadOptions, cb: OnProgr
         percent=100.0, message="下载完成", files=[str(path)],
     ))
     return [str(path)]
+
+
+def _is_network_error(exc: Exception) -> bool:
+    """网络类异常：保留 .part 供续传；其余（内容为空等）清掉重下。"""
+    if isinstance(exc, requests.exceptions.RequestException):
+        return True
+    text = str(exc).lower()
+    return any(k in text for k in ("timeout", "connection", "ssl", "网络"))
 
 
 # --------------------------------------------------------------------------- #
@@ -220,7 +242,10 @@ def _download_video(entry: MediaEntry, opts: DownloadOptions, cb: OnProgress) ->
 # --------------------------------------------------------------------------- #
 # 图片 / 图集
 # --------------------------------------------------------------------------- #
-def _download_images(entry: MediaEntry, opts: DownloadOptions, cb: OnProgress) -> list[str]:
+def _download_images(
+    entry: MediaEntry, opts: DownloadOptions, cb: OnProgress,
+    cancel_event: "threading.Event | None" = None,
+) -> list[str]:
     folder_name = safe_filename(entry.title) or "images"
     folder = opts.outdir / (entry.platform if entry.platform != "generic" else "other") / folder_name
     folder.mkdir(parents=True, exist_ok=True)
@@ -234,14 +259,19 @@ def _download_images(entry: MediaEntry, opts: DownloadOptions, cb: OnProgress) -
     failures: list[str] = []
 
     for index, url in enumerate(urls, start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise _Cancelled("下载已取消")
         cb(Progress(
             entry_id=entry.id, status="downloading", title=entry.title,
             percent=(index - 1) / total * 100,
             message=f"图片 {index}/{total}",
         ))
         try:
-            path = _save_one_image(session, url, folder, f"{index:02d}_{folder_name}")
+            path = _save_one_image(session, url, folder, f"{index:02d}_{folder_name}",
+                                   cancel_event=cancel_event)
             files.append(str(path))
+        except _Cancelled:
+            raise
         except Exception as exc:                      # noqa: BLE001
             failures.append(str(exc)[:120])
         cb(Progress(
@@ -282,6 +312,10 @@ def _resource_session(entry: MediaEntry, opts: DownloadOptions, accept: str = "*
     return session
 
 
+class _Cancelled(RuntimeError):
+    """下载被用户取消：调用方据此保留 .part 以便下次续传。"""
+
+
 def _stream_to_file(
     session: requests.Session,
     url: str,
@@ -290,27 +324,67 @@ def _stream_to_file(
     min_size: int = 128,
     on_start=None,
     on_chunk=None,
+    cancel_event: "threading.Event | None" = None,
 ) -> tuple[Path, str]:
-    """流式落盘，返回 (文件路径, Content-Type)。已存在的文件直接跳过。"""
-    resp = session.get(url, stream=True, timeout=60, allow_redirects=True)
+    """流式落盘，返回 (文件路径, Content-Type)。
+
+    - 已存在的完整文件直接跳过；
+    - 存在同名 .part 时发 Range 请求续传（响应 206 续写，200 则清空重下）；
+    - 提供 cancel_event 时，写块间隙检查取消信号，命中抛 _Cancelled 并保留 .part。
+    """
+    tmp = target.with_name(target.name + ".part")
+
+    # ---- 已有 .part：先试探是否支持续传 ---- #
+    part_size = tmp.stat().st_size if tmp.exists() else 0
+    resumed = False
+    headers: dict[str, str] = {}
+    if part_size > 0:
+        probe = session.get(url, stream=True, timeout=60, allow_redirects=True,
+                            headers={"Range": f"bytes={part_size}-"})
+        accepts_range = probe.status_code == 206
+        probe.close()
+        if accepts_range:
+            headers["Range"] = f"bytes={part_size}-"
+            resumed = True
+        else:
+            # 服务器不支持续传，清空 .part 从头下载
+            tmp.unlink(missing_ok=True)
+            part_size = 0
+
+    resp = session.get(url, stream=True, timeout=60, allow_redirects=True,
+                       headers=headers or None)
     resp.raise_for_status()
     content_type = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
-    total = int(resp.headers.get("Content-Length") or 0)
+    if resp.status_code == 206:
+        total = part_size + int(resp.headers.get("Content-Range", "0/0").split("/")[-1] or 0)
+    else:
+        total = int(resp.headers.get("Content-Length") or 0)
+        if total and part_size:
+            # 服务器忽略 Range 返回完整内容：丢弃 .part 重下
+            tmp.unlink(missing_ok=True)
+            part_size = 0
+            resumed = False
     if on_start:
         override = on_start(total, content_type)
         if override is not None:
             target = override
+            tmp = target.with_name(target.name + ".part")
     if target.exists() and target.stat().st_size > min_size:
         resp.close()
         return target, content_type
-    tmp = target.with_name(target.name + ".part")
     try:
-        with tmp.open("wb") as fp:
+        mode = "ab" if resumed else "wb"
+        written_before = part_size if resumed else 0
+        with tmp.open(mode) as fp:
             for chunk in resp.iter_content(chunk_size=65536):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _Cancelled("下载已取消")
                 if chunk:
                     fp.write(chunk)
+                    written_before += len(chunk)
                     if on_chunk:
-                        on_chunk(len(chunk))
+                        # 续传时把已有字节计入总进度
+                        on_chunk(len(chunk), written_before, total)
     finally:
         resp.close()
     if not tmp.exists() or tmp.stat().st_size < min_size:
@@ -320,13 +394,19 @@ def _stream_to_file(
     return target, content_type
 
 
-def _save_one_image(session: requests.Session, url: str, folder: Path, stem: str) -> Path:
+def _save_one_image(
+    session: requests.Session, url: str, folder: Path, stem: str,
+    cancel_event: "threading.Event | None" = None,
+) -> Path:
     def on_start(_total: int, content_type: str) -> Path:
         ext = _MIME_EXT.get(content_type) or _ext_from_url(url) or ".jpg"
         return folder / f"{safe_filename(stem, 60)}{ext}"
 
     guess = folder / f"{safe_filename(stem, 60)}{_ext_from_url(url) or '.jpg'}"
-    path, _ctype = _stream_to_file(session, url, guess, on_start=on_start)
+    path, _ctype = _stream_to_file(
+        session, url, guess, on_start=on_start, cancel_event=cancel_event,
+        on_chunk=lambda size, _written, _total: None,
+    )
     return path
 
 

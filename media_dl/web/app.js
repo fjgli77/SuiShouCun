@@ -247,10 +247,10 @@
   // ------------------------------------------------------------------ //
   const TASKS = new Map();          // key -> { key, title, status, percent, downloaded, total, speed, eta, message, cancel, _pcJob }
   const PC_JOBS = new Map();        // jobId -> { timer, keys:Set }
-  const TERMINAL = { done: 1, error: 1, cancelled: 1 };
+  const TERMINAL = { done: 1, error: 1, cancelled: 1, existed: 1 };
 
   const STATUS_TEXT = { pending: "排队中", downloading: "下载中", done: "已完成",
-    error: "失败", cancelled: "已取消", skipped: "已跳过" };
+    error: "失败", cancelled: "已取消", skipped: "已跳过", existed: "已存在（未重新下载）" };
 
   // 移动端原生下载并发治理：同时最多 N 个，其余排队，避免图集一次性打满线程池
   const NATIVE_CONCURRENCY = 3;
@@ -340,13 +340,16 @@
       (indeterminate ? 38 : pct).toFixed(1) + '%"></i></div>';
     const cancelBtn = terminal ? "" :
       '<button class="job-cancel" data-cancel="' + escapeHtml(t.key) + '">取消</button>';
-    // 状态徽标：排队中 / 下载中 / 已完成 / 失败 / 已取消
-    const badge = '<span class="tag' + (st === "done" ? " ok" : (st === "error" ? " err" : "")) + '">' +
+    // 失败 / 取消的任务卡提供「重试」：新建一个只含失败条目的下载任务（续传 .part）
+    const retryBtn = (st === "error" || st === "cancelled") && t._pcJob ?
+      '<button class="job-cancel retry" data-retry="' + escapeHtml(t._pcJob) + '">重试</button>' : "";
+    // 状态徽标：排队中 / 下载中 / 已完成 / 失败 / 已取消 / 已存在
+    const badge = '<span class="tag' + (st === "done" || st === "existed" ? " ok" : (st === "error" ? " err" : "")) + '">' +
       escapeHtml(STATUS_TEXT[st] || st) + "</span>";
     return '<div class="job-item ' + st + '">' +
       '<div class="job-top">' +
         '<span class="job-title">' + escapeHtml(t.title || "媒体文件") + "</span>" +
-        badge + cancelBtn +
+        badge + retryBtn + cancelBtn +
       "</div>" + bar +
       '<div class="job-meta">' + escapeHtml(meta.join(" · ")) + "</div>" +
     "</div>";
@@ -367,6 +370,23 @@
     Array.prototype.forEach.call(list.querySelectorAll("[data-cancel]"), (b) => {
       b.addEventListener("click", () => cancelTask(b.dataset.cancel));
     });
+    Array.prototype.forEach.call(list.querySelectorAll("[data-retry]"), (b) => {
+      b.addEventListener("click", () => retryJob(b.dataset.retry));
+    });
+  }
+
+  /** 重试失败 / 已取消的任务：调后端 /retry 新建任务并开始轮询。 */
+  function retryJob(jid) {
+    api("/api/jobs/" + encodeURIComponent(jid) + "/retry", { method: "POST", body: "{}" })
+      .then((res) => {
+        if (res && res.id) {
+          toast("已创建重试任务");
+          pollPcJob(res.id);
+        } else {
+          toast((res && res.error) || "重试失败");
+        }
+      })
+      .catch(() => toast("重试失败，请稍后再试"));
   }
 
   function cancelTask(key) {

@@ -25,7 +25,8 @@ from typing import Any
 from flask import Flask, Response, jsonify, make_response, request, send_file, send_from_directory
 
 from .delivery import create_ticket, fetch as fetch_browser_download, fetch_thumbnail
-from .downloader import download_entry
+from .downloader import download_entry, _Cancelled  # noqa: F401 - _Cancelled 供任务循环判定取消
+from .extractor import parse_text
 from .extractor import parse_text
 from .links import detect_media
 from .models import Progress
@@ -411,6 +412,46 @@ def api_cancel_job(jid: str):
         return jsonify({"ok": True})
 
 
+@app.post("/api/jobs/<jid>/retry")
+def api_retry_job(jid: str):
+    """对失败任务的错误条目重试：新建一个任务，只包含失败的条目文本。
+
+    若原任务失败源于整段文本解析（无 entries），则用原文本整体重试。
+    """
+    with _LOCK:
+        job = _JOBS.get(jid)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        if job["status"] not in ("done", "error", "cancelled"):
+            return jsonify({"error": "任务仍在进行中，无法重试"}), 400
+        # 找到失败条目对应的原始链接文本：从原文本按行匹配失败标题所在行
+        failed_titles = {c.get("title", "") for c in job["cards"].values()
+                         if c.get("status") == "error"}
+        retry_text = ""
+        if failed_titles:
+            lines = [ln for ln in job["text"].splitlines() if ln.strip()]
+            hits = [ln for ln in lines
+                    if any(t and t in ln for t in failed_titles)]
+            retry_text = "\n".join(hits)
+        if not retry_text:
+            # 无法定位失败行（如解析整段失败）：整段重试
+            retry_text = job["text"]
+        data = {"text": retry_text, "options": job["options"]}
+    new_jid = uuid.uuid4().hex[:12]
+    opts = DownloadOptions.from_dict(data["options"])
+    new_job: dict[str, Any] = {
+        "id": new_jid, "text": data["text"][:2000], "options": opts.to_dict(),
+        "status": "queued", "cards": {}, "entries": [], "errors": [],
+        "files": [], "logs": [f"重试自任务 {jid}，共 {len(data['text'].splitlines())} 行"],
+        "created": time.time(), "finished": None,
+        "cancel": threading.Event(),
+    }
+    with _LOCK:
+        _JOBS[new_jid] = new_job
+    threading.Thread(target=_run_job, args=(new_jid,), daemon=True).start()
+    return jsonify({"id": new_jid})
+
+
 _IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
 _VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".ts"}
 _AUDIO_EXT = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg"}
@@ -594,11 +635,18 @@ def _run_job(jid: str) -> None:
                     break
                 try:
                     on_progress(Progress(entry_id=entry.id, status="pending", title=entry.title))
-                    files = download_entry(entry, opts, on_progress)
+                    # cancel_event 传入下载器：写块间隙即响应取消，而非等当前文件下完
+                    files = download_entry(entry, opts, on_progress, cancel_event=cancel)
                     with _LOCK:
                         for f in files:
                             if f not in job["files"]:
                                 job["files"].append(f)
+                except _Cancelled:
+                    with _LOCK:
+                        job["cards"][entry.id] = Progress(
+                            entry_id=entry.id, status="cancelled", title=entry.title,
+                            message="已取消（.part 已保留，重试可续传）").to_dict()
+                    break
                 except RuntimeError as exc:
                     if "取消" not in str(exc):
                         friendly = _friendly_error(exc, "下载失败，请稍后重试")
